@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Transcript Styler",
-  "version": "0.4.0-test",
+  "version": "0.4.1",
   "description": "Extract, restyle, and enhance transcripts with AI. Supports multiple LLM providers and TTS options.",
 
   "permissions": [
@@ -9,13 +9,6 @@
   ],
 
   "host_permissions": [
-    "https://video.google.com/*",
-    "https://api.openai.com/*",
-    "https://api.anthropic.com/*",
-    "https://*.tts.speech.microsoft.com/*"
-  ],
-
-  "optional_host_permissions": [
     "<all_urls>"
   ],
 
