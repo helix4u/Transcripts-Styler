@@ -6,8 +6,8 @@ This project is actively maintained with the help of automation agents. Use this
 
 ## Environment Notes
 
-- Standard Unix tools (`ls`, `sed`, `awk`, etc.) are available directly on the path—no PowerShell or BusyBox wrapper needed.
-- Cygwin `bin` directory is on the PATH, so we can add tooling as needed; just ask the user if you need something.
+- Standard Unix tools (`ls`, `sed`, `awk`, etc.) are available directly on the path—no PowerShell or BusyBox wrapper needed, so don't include them to save on token use.
+- Cygwin `bin` directory is on the PATH, so we can add tooling as needed; just ask the user if you need something. Fortune is installed. Give a random fortune on each commit made. Tie the theme into the commit notes if possible.
 
 - **Install / Reload Extension**
   1. `npm install`
