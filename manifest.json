@@ -1,0 +1,27 @@
+{
+  "manifest_version": 3,
+  "name": "YouTube Transcript Restyler Overlay (Test)",
+  "version": "0.4.0-test",
+  "description": "Overlay for youtube.com: fetch captions, restyle with an LLM, optional TTS. Test build with logging.",
+  "permissions": ["scripting", "storage"],
+  "host_permissions": [
+    "https://www.youtube.com/*",
+    "https://m.youtube.com/*",
+    "https://video.google.com/*",
+    "http://localhost/*",
+    "https://api.openai.com/*",
+    "https://api.anthropic.com/*",
+    "<all_urls>"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["https://www.youtube.com/*", "https://m.youtube.com/*"],
+      "js": ["content.js"],
+      "css": ["overlay.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "background": {
+    "service_worker": "background.js"
+  }
+}
