@@ -1,380 +1,589 @@
-/**
- * background.js (TEST BUILD)
- * Service worker for cross-origin fetches (timedtext, LLM, TTS)
- * Provides compact logging with optional debug mode.
- * NOTE: Do not persist API keys; keep them in the content script only.
- */
+// Transcript Styler - Background Service Worker
+// v0.4.0-test with comprehensive logging and debug features
 
-const BG_LOG_PREFIX = '[yt-restyle/bg]';
-let BG_DEBUG = false; // flipped when ytro_debug flag stored
+// Global debug state
+let DEBUG_ENABLED = false;
 
-const bglog = {
-  info: (...args) => console.log(BG_LOG_PREFIX, ...args),
-  warn: (...args) => console.warn(BG_LOG_PREFIX, ...args),
-  error: (...args) => console.error(BG_LOG_PREFIX, ...args),
-  debug: (...args) => { if (BG_DEBUG) console.debug(BG_LOG_PREFIX, ...args); }
-};
-
-chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  if (!msg || !msg.type) return;
-
-  (async () => {
-    const t0 = performance.now();
-    try {
-      // -------- Timedtext --------
-      if (msg.type === 'LIST_TRACKS') {
-        bglog.debug('LIST_TRACKS', { videoId: msg.videoId });
-        const listUrl = `https://video.google.com/timedtext?type=list&v=${encodeURIComponent(msg.videoId)}`;
-        const text = await fetchText(listUrl);
-        bglog.info('LIST_TRACKS ok', dur(t0));
-        sendResponse({ ok: true, text });
-        return;
-      }
-
-      if (msg.type === 'FETCH_TRANSCRIPT') {
-        const { videoId, lang } = msg;
-        bglog.debug('FETCH_TRANSCRIPT', { videoId, lang });
-        const base = `https://video.google.com/timedtext?lang=${encodeURIComponent(lang)}&v=${encodeURIComponent(videoId)}`;
-        try {
-          const vtt = await fetchText(base + '&fmt=vtt');
-          if (vtt.trim().includes('WEBVTT')) {
-            bglog.info('FETCH_TRANSCRIPT vtt', dur(t0));
-            sendResponse({ ok: true, kind: 'vtt', text: vtt });
-            return;
-          }
-        } catch (err) {
-          bglog.debug('FETCH_TRANSCRIPT vtt fallback', String(err));
-        }
-        const xml = await fetchText(base + '&fmt=srv3');
-        bglog.info('FETCH_TRANSCRIPT srv3', dur(t0));
-        sendResponse({ ok: true, kind: 'srv3', text: xml });
-        return;
-      }
-
-      // -------- LLM calls --------
-      if (msg.type === 'LLM_CALL') {
-        const { provider, model, apiKey, baseUrl, temperature, maxTokens, prompt, asciiOnly } = msg.payload || {};
-        bglog.debug('LLM_CALL', {
-          provider,
-          model,
-          temperature,
-          maxTokens,
-          baseUrl: safeUrl(baseUrl),
-          asciiOnly
-        });
-
-        if (provider === 'openai-compatible') {
-          if (!baseUrl) throw new Error('Missing baseUrl for OpenAI-compatible');
-          const res = await fetch(trimSlash(baseUrl) + '/v1/chat/completions', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              ...(apiKey ? { 'Authorization': 'Bearer ' + apiKey } : {})
-            },
-            body: JSON.stringify({
-              model,
-              temperature,
-              max_tokens: maxTokens,
-              messages: [
-                { role: 'system', content: 'You rewrite captions carefully. Output only the rewritten line.' },
-                { role: 'user', content: prompt }
-              ]
-            })
-          });
-          if (!res.ok) throw new Error('HTTP ' + res.status);
-          const json = await res.json();
-          const out = json?.choices?.[0]?.message?.content?.trim() || '';
-          bglog.info('LLM_CALL openai-compatible ok', dur(t0));
-          sendResponse({ ok: true, text: out });
-          return;
-        }
-
-        if (provider === 'openai') {
-          const body = {
-            model,
-            temperature,
-            max_tokens: maxTokens,
-            messages: [
-              { role: 'system', content: 'You rewrite captions carefully. Output only the rewritten line.' },
-              { role: 'user', content: prompt }
-            ],
-            logit_bias: openaiAsciiLogitBias(!!asciiOnly),
-            response_format: { type: 'text' }
-          };
-          const res = await fetch('https://api.openai.com/v1/chat/completions', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'Authorization': 'Bearer ' + apiKey
-            },
-            body: JSON.stringify(body)
-          });
-          if (!res.ok) throw new Error('HTTP ' + res.status);
-          const json = await res.json();
-          const out = json?.choices?.[0]?.message?.content?.trim() || '';
-          bglog.info('LLM_CALL openai ok', dur(t0));
-          sendResponse({ ok: true, text: out });
-          return;
-        }
-
-        if (provider === 'anthropic') {
-          const res = await fetch('https://api.anthropic.com/v1/messages', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'x-api-key': apiKey,
-              'anthropic-version': '2023-06-01'
-            },
-            body: JSON.stringify({
-              model,
-              max_tokens: maxTokens,
-              temperature,
-              system: 'You rewrite captions carefully. Output only the rewritten line.',
-              messages: [{ role: 'user', content: prompt }]
-            })
-          });
-          if (!res.ok) throw new Error('HTTP ' + res.status);
-          const json = await res.json();
-          const out = json?.content?.[0]?.text?.trim?.() || '';
-          bglog.info('LLM_CALL anthropic ok', dur(t0));
-          sendResponse({ ok: true, text: out });
-          return;
-        }
-
-        throw new Error('Unknown provider');
-      }
-
-      // -------- TTS providers --------
-      if (msg.type === 'TTS_SPEAK') {
-        const { provider, apiKey, model, voice, format, text, baseUrl, kokoroPath, lang, azureRegion } = msg.payload || {};
-        bglog.debug('TTS_SPEAK', {
-          provider,
-          model,
-          voice,
-          format,
-          baseUrl: safeUrl(baseUrl),
-          path: kokoroPath,
-          lang,
-          azureRegion
-        });
-
-        if (provider === 'openai-tts') {
-          const res = await fetch('https://api.openai.com/v1/audio/speech', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'Authorization': 'Bearer ' + apiKey
-            },
-            body: JSON.stringify({
-              model: model || 'gpt-4o-mini-tts',
-              voice: voice || 'alloy',
-              input: text,
-              format: format || 'mp3'
-            })
-          });
-          if (!res.ok) throw new Error('TTS HTTP ' + res.status);
-          const buf = await res.arrayBuffer();
-          bglog.info('TTS openai ok', dur(t0));
-          sendResponse({ ok: true, audioB64: arrayBufferToBase64(buf), mime: pickMime(format) });
-          return;
-        }
-
-        if (provider === 'openai-compatible-tts') {
-          if (!baseUrl) throw new Error('Missing baseUrl for OpenAI-compatible TTS');
-          const res = await fetch(trimSlash(baseUrl) + '/v1/audio/speech', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              ...(apiKey ? { 'Authorization': 'Bearer ' + apiKey } : {})
-            },
-            body: JSON.stringify({
-              model: model || 'gpt-4o-mini-tts',
-              voice: voice || 'alloy',
-              input: text,
-              format: format || 'mp3'
-            })
-          });
-          if (!res.ok) throw new Error('TTS HTTP ' + res.status);
-          const buf = await res.arrayBuffer();
-          bglog.info('TTS openai-compatible ok', dur(t0));
-          sendResponse({ ok: true, audioB64: arrayBufferToBase64(buf), mime: pickMime(format) });
-          return;
-        }
-
-        if (provider === 'kokoro-fastapi') {
-          const base = trimSlash(baseUrl || 'http://localhost:8000');
-          const path = kokoroPath || '/tts';
-          const res = await fetch(base + path, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ text, voice: voice || 'default', lang: lang || '' })
-          });
-          if (!res.ok) throw new Error('Kokoro HTTP ' + res.status);
-          const buf = await res.arrayBuffer();
-          bglog.info('TTS kokoro ok', dur(t0));
-          sendResponse({ ok: true, audioB64: arrayBufferToBase64(buf), mime: 'audio/wav' });
-          return;
-        }
-
-        if (provider === 'azure-tts') {
-          if (!azureRegion) throw new Error('Azure region required');
-          if (!apiKey) throw new Error('Azure Speech key required');
-          const url = `https://${azureRegion}.tts.speech.microsoft.com/cognitiveservices/v1`;
-          const ssml = `
-            <speak version="1.0" xml:lang="en-US">
-              <voice name="${voice || 'en-US-JennyNeural'}">
-                <prosody rate="0%" pitch="0%">${escapeSSML(text)}</prosody>
-              </voice>
-            </speak>`
-            .replace(/\s+/g, ' ')
-            .trim();
-          const res = await fetch(url, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/ssml+xml',
-              'Ocp-Apim-Subscription-Key': apiKey,
-              'X-Microsoft-OutputFormat': azureFormat(format),
-              'User-Agent': 'yt-restyle-overlay/0.4.0-test'
-            },
-            body: ssml
-          });
-          if (!res.ok) throw new Error('Azure TTS HTTP ' + res.status);
-          const buf = await res.arrayBuffer();
-          bglog.info('TTS azure ok', dur(t0));
-          sendResponse({ ok: true, audioB64: arrayBufferToBase64(buf), mime: pickMime(format) });
-          return;
-        }
-
-        throw new Error('Unknown TTS provider');
-      }
-
-      if (msg.type === 'TTS_AZURE_VOICES') {
-        const { azureRegion, apiKey } = msg.payload || {};
-        if (!azureRegion) throw new Error('Azure region required');
-        if (!apiKey) throw new Error('Azure Speech key required');
-        const url = `https://${azureRegion}.tts.speech.microsoft.com/cognitiveservices/voices/list`;
-        const res = await fetch(url, {
-          method: 'GET',
-          headers: {
-            'Ocp-Apim-Subscription-Key': apiKey,
-            'User-Agent': 'yt-restyle-overlay/0.4.0-test'
-          }
-        });
-        if (!res.ok) throw new Error('Azure voices HTTP ' + res.status);
-        const json = await res.json();
-        bglog.info('Azure voices ok', { count: Array.isArray(json) ? json.length : 0, ...dur(t0) });
-        sendResponse({ ok: true, voices: json });
-        return;
-      }
-
-      // -------- Prefs --------
-      if (msg.type === 'GET_PREFS') {
-        const keys = ['ytro_prefs', 'ytro_presets', 'ytro_theme', 'ytro_pos_left', 'ytro_pos_top', 'ytro_debug'];
-        const data = await chrome.storage.local.get(keys);
-        if (typeof data.ytro_debug === 'boolean') BG_DEBUG = data.ytro_debug;
-        bglog.debug('GET_PREFS', { have: Object.keys(data) });
-        sendResponse({ ok: true, data });
-        return;
-      }
-
-      if (msg.type === 'SET_PREFS') {
-        await chrome.storage.local.set(msg.data || {});
-        if (typeof msg.data?.ytro_debug === 'boolean') BG_DEBUG = msg.data.ytro_debug;
-        bglog.debug('SET_PREFS', { keys: Object.keys(msg.data || {}) });
-        sendResponse({ ok: true });
-        return;
-      }
-
-      sendResponse({ ok: false, error: 'Unknown message type' });
-    } catch (err) {
-      bglog.error(msg?.type || 'unknown', String(err), dur(t0));
-      sendResponse({ ok: false, error: String(err) });
-    }
-  })();
-
-  return true; // keep channel open for async reply
-});
-
-// -------- helpers --------
-async function fetchText(url) {
-  const res = await fetch(url, { method: 'GET' });
-  if (!res.ok) throw new Error('HTTP ' + res.status);
-  return await res.text();
+// Logging utilities with key redaction
+function redact(str) {
+  if (!str || typeof str !== 'string') return str;
+  if (str.length <= 8) return '***';
+  return str.substring(0, 4) + '***' + str.substring(str.length - 4);
 }
 
-function trimSlash(s) {
-  return (s || '').replace(/\/+$/, '');
+function safeUrl(url) {
+  try {
+    const u = new URL(url);
+    return `${u.protocol}//${u.hostname}${u.pathname}`;
+  } catch {
+    return url;
+  }
 }
 
-function safeUrl(u) {
-  return u ? u.split('?')[0] : '';
+function log(...args) {
+  if (DEBUG_ENABLED) {
+    console.log('[TS-BG]', ...args);
+  }
 }
 
-function dur(t0) {
-  return { ms: Math.round(performance.now() - t0) };
+function logError(...args) {
+  console.error('[TS-BG-ERROR]', ...args);
 }
 
-function pickMime(fmt) {
-  const f = (fmt || 'mp3').toLowerCase();
-  if (f === 'wav') return 'audio/wav';
-  if (f === 'ogg') return 'audio/ogg';
-  return 'audio/mpeg';
+// Utility functions
+function slashTrim(s) {
+  return s?.replace(/\/+$/, '') || '';
 }
 
-function arrayBufferToBase64(buf) {
-  const bytes = new Uint8Array(buf);
-  let bin = '';
+function pickMime(response) {
+  const ct = response.headers.get('content-type') || '';
+  if (ct.includes('audio/mpeg') || ct.includes('audio/mp3')) return 'audio/mpeg';
+  if (ct.includes('audio/wav') || ct.includes('audio/wave')) return 'audio/wav';
+  if (ct.includes('audio/ogg')) return 'audio/ogg';
+  if (ct.includes('audio/webm')) return 'audio/webm';
+  return 'audio/mpeg'; // fallback
+}
+
+async function arrayBufferToBase64(buffer) {
+  const bytes = new Uint8Array(buffer);
+  let binary = '';
   for (let i = 0; i < bytes.length; i++) {
-    bin += String.fromCharCode(bytes[i]);
+    binary += String.fromCharCode(bytes[i]);
   }
-  return btoa(bin);
+  return btoa(binary);
 }
 
-function openaiAsciiLogitBias(enable) {
-  if (!enable) return undefined;
-  // discourage common problematic Unicode punctuation when Strict ASCII is on
-  const STR_KEYS = [
-    '\u2014', // em dash —
-    '\u2013', // en dash –
-    '\u2026', // ellipsis …
-    '\u201c', // left double quote “
-    '\u201d', // right double quote ”
-    '\u2018', // left single quote ‘
-    '\u2019', // right single quote ’
-    '\u201e', // low double quote „
-    '\u201a', // low single quote ‚
-    '\u00ab', // «
-    '\u00bb', // »
-    '\u00a0', // nbsp
-    '\u2022', // bullet •
-    '\u2027', // interpunct
-    '\u2192', // →
-    '\u2190', // ←
-    '\u2191', // ↑
-    '\u2193', // ↓
-    '\u2122', // ™
-    '\u00ae', // ®
-    '\u00a9'  // ©
-  ];
+// ASCII sanitization for OpenAI logit bias
+// Note: Character list reconstructed from corrupted source - may need refinement
+const STR_KEYS = [
+  'â', 'ã', 'ä', 'å', 'æ', 'ç', 'è', 'é', 'ê', 'ë', 'ì', 'í', 'î', 'ï',
+  'ð', 'ñ', 'ò', 'ó', 'ô', 'õ', 'ö', 'ø', 'ù', 'ú', 'û', 'ü', 'ý', 'þ',
+  'ÿ', 'À', 'Á', 'Â', 'Ã', 'Ä', 'Å', 'Æ', 'Ç', 'È', 'É', 'Ê', 'Ë', 'Ì',
+  'Í', 'Î', 'Ï', 'Ð', 'Ñ', 'Ò', 'Ó', 'Ô', 'Õ', 'Ö', 'Ø', 'Ù', 'Ú', 'Û',
+  'Ü', 'Ý', 'Þ', '\u2013', '\u2014', '\u2018', '\u2019', '\u201C', '\u201D', '\u2026', '\u2022', '\u2122', '\u00A9', '\u00AE', '\u00A7',
+  '\u00B6', '\u2020', '\u2021', '\u2030', '\u2039', '\u203A', '\u00AB', '\u00BB', '\u00A1', '\u00BF', '\u00A2', '\u00A3', '\u00A4', '\u00A5', '\u00A6',
+  '\u00A8', '\u00A9', '\u00AA', '\u00AC', '\u00AE', '\u00AF', '\u00B0', '\u00B1', '\u00B2', '\u00B3', '\u00B4', '\u00B5', '\u00B6', '\u00B7', '\u00B8',
+  '\u00B9', '\u00BA', '\u00BB', '\u00BC', '\u00BD', '\u00BE', '\u00BF', '\u00D7', '\u00F7'
+];
+
+function openaiAsciiLogitBias(asciiOnly) {
+  if (!asciiOnly) return undefined;
   const bias = {};
-  for (const token of STR_KEYS) {
-    bias[token] = -100;
-  }
+  STR_KEYS.forEach(char => {
+    bias[char] = -100;
+  });
   return bias;
 }
 
-function escapeSSML(input) {
-  return String(input || '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&apos;');
+// Message handler
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  const { action, data } = message;
+  log(`Received message: ${action}`, data ? Object.keys(data) : 'no data');
+
+  switch (action) {
+    case 'LIST_TRACKS':
+      handleListTracks(data, sendResponse);
+      return true; // async response
+
+    case 'FETCH_TRANSCRIPT':
+      handleFetchTranscript(data, sendResponse);
+      return true; // async response
+
+    case 'LLM_CALL':
+      handleLLMCall(data, sendResponse);
+      return true; // async response
+
+    case 'TTS_SPEAK':
+      handleTTSSpeak(data, sendResponse);
+      return true; // async response
+
+    case 'TTS_AZURE_VOICES':
+      handleAzureVoices(data, sendResponse);
+      return true; // async response
+
+    case 'GET_PREFS':
+      handleGetPrefs(data, sendResponse);
+      return true; // async response
+
+    case 'SET_PREFS':
+      handleSetPrefs(data, sendResponse);
+      return true; // async response
+
+    default:
+      log(`Unknown action: ${action}`);
+      sendResponse({ success: false, error: 'Unknown action' });
+      return false;
+  }
+});
+
+// Track listing handler
+async function handleListTracks(data, sendResponse) {
+  const start = Date.now();
+  try {
+    const { videoId } = data;
+    if (!videoId) {
+      throw new Error('Video ID required');
+    }
+
+    log(`Listing tracks for video: ${videoId}`);
+    
+    const url = `https://video.google.com/timedtext?type=list&v=${videoId}`;
+    const response = await fetch(url);
+    
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+    }
+
+    const xml = await response.text();
+    log(`Track list fetched in ${Date.now() - start}ms, length: ${xml.length}`);
+    
+    sendResponse({ success: true, data: xml });
+  } catch (error) {
+    logError('LIST_TRACKS failed:', error.message);
+    sendResponse({ success: false, error: error.message });
+  }
 }
 
-function azureFormat(fmt) {
-  const f = (fmt || 'mp3').toLowerCase();
-  if (f === 'wav') return 'riff-24khz-16bit-mono-pcm';
-  if (f === 'ogg') return 'ogg-24khz-16bit-mono-opus';
-  return 'audio-24khz-96kbitrate-mono-mp3';
+// Transcript fetching handler
+async function handleFetchTranscript(data, sendResponse) {
+  const start = Date.now();
+  try {
+    const { videoId, lang = 'en', name = '' } = data;
+    if (!videoId) {
+      throw new Error('Video ID required');
+    }
+
+    log(`Fetching transcript: video=${videoId}, lang=${lang}, name=${name}`);
+
+    // Try VTT format first
+    let url = `https://video.google.com/timedtext?lang=${encodeURIComponent(lang)}&v=${videoId}&fmt=vtt`;
+    if (name) {
+      url += `&name=${encodeURIComponent(name)}`;
+    }
+
+    let response = await fetch(url);
+    let format = 'vtt';
+
+    // Fallback to SRV3 XML if VTT fails
+    if (!response.ok) {
+      log(`VTT failed (${response.status}), trying SRV3 XML`);
+      url = `https://video.google.com/timedtext?lang=${encodeURIComponent(lang)}&v=${videoId}&fmt=srv3`;
+      if (name) {
+        url += `&name=${encodeURIComponent(name)}`;
+      }
+      response = await fetch(url);
+      format = 'srv3';
+    }
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+    }
+
+    const text = await response.text();
+    log(`Transcript fetched in ${Date.now() - start}ms, format: ${format}, length: ${text.length}`);
+    
+    sendResponse({ success: true, data: { text, format } });
+  } catch (error) {
+    logError('FETCH_TRANSCRIPT failed:', error.message);
+    sendResponse({ success: false, error: error.message });
+  }
 }
+
+// LLM call handler
+async function handleLLMCall(data, sendResponse) {
+  const start = Date.now();
+  try {
+    const { provider, baseUrl, apiKey, model, systemPrompt, userPrompt, asciiOnly = false } = data;
+    
+    if (!provider || !baseUrl || !apiKey || !model || !userPrompt) {
+      throw new Error('Missing required parameters');
+    }
+
+    log(`LLM call: provider=${provider}, model=${model}, baseUrl=${safeUrl(baseUrl)}, asciiOnly=${asciiOnly}`);
+
+    let response;
+    
+    switch (provider) {
+      case 'openai':
+        response = await callOpenAI(baseUrl, apiKey, model, systemPrompt, userPrompt, asciiOnly);
+        break;
+        
+      case 'anthropic':
+        response = await callAnthropic(baseUrl, apiKey, model, systemPrompt, userPrompt);
+        break;
+        
+      case 'openai-compatible':
+        response = await callOpenAICompatible(baseUrl, apiKey, model, systemPrompt, userPrompt, asciiOnly);
+        break;
+        
+      default:
+        throw new Error(`Unsupported provider: ${provider}`);
+    }
+
+    log(`LLM call completed in ${Date.now() - start}ms`);
+    sendResponse({ success: true, data: response });
+  } catch (error) {
+    logError('LLM_CALL failed:', error.message);
+    sendResponse({ success: false, error: error.message });
+  }
+}
+
+// OpenAI API call
+async function callOpenAI(baseUrl, apiKey, model, systemPrompt, userPrompt, asciiOnly) {
+  const url = `${slashTrim(baseUrl)}/v1/chat/completions`;
+  
+  const messages = [];
+  if (systemPrompt) {
+    messages.push({ role: 'system', content: systemPrompt });
+  }
+  messages.push({ role: 'user', content: userPrompt });
+
+  const body = {
+    model,
+    messages,
+    max_tokens: 1000,
+    temperature: 0.7
+  };
+
+  // Add logit bias for ASCII-only mode
+  const logitBias = openaiAsciiLogitBias(asciiOnly);
+  if (logitBias) {
+    body.logit_bias = logitBias;
+    log(`Applied ASCII logit bias with ${Object.keys(logitBias).length} entries`);
+  }
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${apiKey}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify(body)
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`OpenAI API error: ${response.status} ${errorText}`);
+  }
+
+  const result = await response.json();
+  return result.choices?.[0]?.message?.content || 'No response';
+}
+
+// Anthropic API call
+async function callAnthropic(baseUrl, apiKey, model, systemPrompt, userPrompt) {
+  const url = `${slashTrim(baseUrl)}/v1/messages`;
+  
+  const body = {
+    model,
+    max_tokens: 1000,
+    messages: [{ role: 'user', content: userPrompt }]
+  };
+
+  if (systemPrompt) {
+    body.system = systemPrompt;
+  }
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'x-api-key': apiKey,
+      'Content-Type': 'application/json',
+      'anthropic-version': '2023-06-01'
+    },
+    body: JSON.stringify(body)
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Anthropic API error: ${response.status} ${errorText}`);
+  }
+
+  const result = await response.json();
+  return result.content?.[0]?.text || 'No response';
+}
+
+// OpenAI-compatible API call
+async function callOpenAICompatible(baseUrl, apiKey, model, systemPrompt, userPrompt, asciiOnly) {
+  const url = `${slashTrim(baseUrl)}/v1/chat/completions`;
+  
+  const messages = [];
+  if (systemPrompt) {
+    messages.push({ role: 'system', content: systemPrompt });
+  }
+  messages.push({ role: 'user', content: userPrompt });
+
+  const body = {
+    model,
+    messages,
+    max_tokens: 1000,
+    temperature: 0.7
+  };
+
+  // Some providers may support logit_bias
+  const logitBias = openaiAsciiLogitBias(asciiOnly);
+  if (logitBias) {
+    body.logit_bias = logitBias;
+    log(`Applied ASCII logit bias to OpenAI-compatible provider`);
+  }
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${apiKey}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify(body)
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`API error: ${response.status} ${errorText}`);
+  }
+
+  const result = await response.json();
+  return result.choices?.[0]?.message?.content || 'No response';
+}
+
+// TTS handler
+async function handleTTSSpeak(data, sendResponse) {
+  const start = Date.now();
+  try {
+    const { provider, text, voice, baseUrl, apiKey, azureRegion } = data;
+    
+    if (!provider || !text) {
+      throw new Error('Provider and text required');
+    }
+
+    log(`TTS request: provider=${provider}, voice=${voice || 'default'}, textLength=${text.length}`);
+
+    let result;
+    
+    switch (provider) {
+      case 'openai':
+        result = await ttsOpenAI(baseUrl, apiKey, text, voice);
+        break;
+        
+      case 'openai-compatible':
+        result = await ttsOpenAICompatible(baseUrl, apiKey, text, voice);
+        break;
+        
+      case 'kokoro':
+        result = await ttsKokoro(baseUrl, text, voice);
+        break;
+        
+      case 'azure':
+        result = await ttsAzure(apiKey, azureRegion, text, voice);
+        break;
+        
+      default:
+        throw new Error(`Unsupported TTS provider: ${provider}`);
+    }
+
+    log(`TTS completed in ${Date.now() - start}ms, audioSize=${result.audioData?.length || 0}`);
+    sendResponse({ success: true, data: result });
+  } catch (error) {
+    logError('TTS_SPEAK failed:', error.message);
+    sendResponse({ success: false, error: error.message });
+  }
+}
+
+// OpenAI TTS
+async function ttsOpenAI(baseUrl, apiKey, text, voice = 'alloy') {
+  const url = `${slashTrim(baseUrl)}/v1/audio/speech`;
+  
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${apiKey}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      model: 'tts-1',
+      input: text,
+      voice: voice
+    })
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`OpenAI TTS error: ${response.status} ${errorText}`);
+  }
+
+  const arrayBuffer = await response.arrayBuffer();
+  const base64 = await arrayBufferToBase64(arrayBuffer);
+  const mime = pickMime(response);
+
+  return { audioData: base64, mime };
+}
+
+// OpenAI-compatible TTS
+async function ttsOpenAICompatible(baseUrl, apiKey, text, voice = 'default') {
+  const url = `${slashTrim(baseUrl)}/v1/audio/speech`;
+  
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${apiKey}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      model: 'tts-1',
+      input: text,
+      voice: voice
+    })
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`TTS API error: ${response.status} ${errorText}`);
+  }
+
+  const arrayBuffer = await response.arrayBuffer();
+  const base64 = await arrayBufferToBase64(arrayBuffer);
+  const mime = pickMime(response);
+
+  return { audioData: base64, mime };
+}
+
+// Kokoro FastAPI TTS
+async function ttsKokoro(baseUrl, text, voice) {
+  const url = `${slashTrim(baseUrl)}/tts`;
+  
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      text: text,
+      voice: voice || 'default',
+      lang: 'en'
+    })
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Kokoro TTS error: ${response.status} ${errorText}`);
+  }
+
+  const arrayBuffer = await response.arrayBuffer();
+  const base64 = await arrayBufferToBase64(arrayBuffer);
+  const mime = pickMime(response);
+
+  return { audioData: base64, mime };
+}
+
+// Azure TTS
+async function ttsAzure(apiKey, region, text, voice = 'en-US-AriaNeural') {
+  const url = `https://${region}.tts.speech.microsoft.com/cognitiveservices/v1`;
+  
+  const ssml = `
+    <speak version='1.0' xml:lang='en-US'>
+      <voice name='${voice}'>${text.replace(/[<>&'"]/g, (m) => {
+        const map = { '<': '&lt;', '>': '&gt;', '&': '&amp;', "'": '&apos;', '"': '&quot;' };
+        return map[m];
+      })}</voice>
+    </speak>
+  `;
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Ocp-Apim-Subscription-Key': apiKey,
+      'Content-Type': 'application/ssml+xml',
+      'X-Microsoft-OutputFormat': 'audio-16khz-128kbitrate-mono-mp3'
+    },
+    body: ssml
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Azure TTS error: ${response.status} ${errorText}`);
+  }
+
+  const arrayBuffer = await response.arrayBuffer();
+  const base64 = await arrayBufferToBase64(arrayBuffer);
+
+  return { audioData: base64, mime: 'audio/mpeg' };
+}
+
+// Azure voices handler
+async function handleAzureVoices(data, sendResponse) {
+  const start = Date.now();
+  try {
+    const { apiKey, azureRegion } = data;
+    
+    if (!apiKey || !azureRegion) {
+      throw new Error('API key and region required');
+    }
+
+    log(`Fetching Azure voices for region: ${azureRegion}`);
+    
+    const url = `https://${azureRegion}.tts.speech.microsoft.com/cognitiveservices/voices/list`;
+    
+    const response = await fetch(url, {
+      headers: {
+        'Ocp-Apim-Subscription-Key': apiKey
+      }
+    });
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+    }
+
+    const voices = await response.json();
+    log(`Fetched ${voices.length} Azure voices in ${Date.now() - start}ms`);
+    
+    sendResponse({ success: true, data: voices });
+  } catch (error) {
+    logError('TTS_AZURE_VOICES failed:', error.message);
+    sendResponse({ success: false, error: error.message });
+  }
+}
+
+// Preferences handlers
+async function handleGetPrefs(data, sendResponse) {
+  try {
+    const { keys } = data;
+    const result = await chrome.storage.local.get(keys);
+    
+    // Check for debug flag
+    if (result.ytro_debug !== undefined) {
+      DEBUG_ENABLED = result.ytro_debug;
+      log(`Debug mode ${DEBUG_ENABLED ? 'enabled' : 'disabled'}`);
+    }
+    
+    sendResponse({ success: true, data: result });
+  } catch (error) {
+    logError('GET_PREFS failed:', error.message);
+    sendResponse({ success: false, error: error.message });
+  }
+}
+
+async function handleSetPrefs(data, sendResponse) {
+  try {
+    const { prefs } = data;
+    await chrome.storage.local.set(prefs);
+    
+    // Update debug flag if present
+    if (prefs.ytro_debug !== undefined) {
+      DEBUG_ENABLED = prefs.ytro_debug;
+      log(`Debug mode ${DEBUG_ENABLED ? 'enabled' : 'disabled'}`);
+    }
+    
+    log('Preferences saved:', Object.keys(prefs));
+    sendResponse({ success: true });
+  } catch (error) {
+    logError('SET_PREFS failed:', error.message);
+    sendResponse({ success: false, error: error.message });
+  }
+}
+
+// Initialize debug state on startup
+chrome.storage.local.get(['ytro_debug']).then(result => {
+  DEBUG_ENABLED = result.ytro_debug || false;
+  log('Background service worker initialized, debug:', DEBUG_ENABLED);
+});
+
+log('Transcript Styler background script loaded');

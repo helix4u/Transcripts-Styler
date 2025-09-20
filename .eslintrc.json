@@ -1,0 +1,59 @@
+{
+  "env": {
+    "browser": true,
+    "es2021": true,
+    "webextensions": true
+  },
+  "extends": [
+    "standard"
+  ],
+  "parserOptions": {
+    "ecmaVersion": "latest",
+    "sourceType": "module"
+  },
+  "globals": {
+    "chrome": "readonly"
+  },
+  "rules": {
+    "no-console": "off",
+    "no-unused-vars": ["error", { "argsIgnorePattern": "^_" }],
+    "prefer-const": "error",
+    "no-var": "error",
+    "object-shorthand": "error",
+    "prefer-arrow-callback": "error",
+    "arrow-spacing": "error",
+    "prefer-template": "error",
+    "template-curly-spacing": "error",
+    "space-before-function-paren": ["error", {
+      "anonymous": "always",
+      "named": "never",
+      "asyncArrow": "always"
+    }],
+    "comma-dangle": ["error", "never"],
+    "semi": ["error", "always"],
+    "quotes": ["error", "single", { "avoidEscape": true }],
+    "indent": ["error", 2],
+    "max-len": ["warn", { "code": 100, "ignoreUrls": true }],
+    "no-multiple-empty-lines": ["error", { "max": 2 }],
+    "eol-last": "error",
+    "no-trailing-spaces": "error"
+  },
+  "overrides": [
+    {
+      "files": ["background.js"],
+      "env": {
+        "serviceworker": true
+      }
+    },
+    {
+      "files": ["content.js"],
+      "env": {
+        "browser": true
+      },
+      "globals": {
+        "speechSynthesis": "readonly",
+        "SpeechSynthesisUtterance": "readonly"
+      }
+    }
+  ]
+}

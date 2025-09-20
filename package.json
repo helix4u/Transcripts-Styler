@@ -1,0 +1,106 @@
+{
+  "name": "transcript-styler",
+  "version": "0.4.0-test",
+  "description": "A powerful Chrome extension that extracts, enhances, and transforms transcripts using AI",
+  "main": "background.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "lint": "eslint *.js",
+    "format": "prettier --write *.js *.json *.md *.css",
+    "build": "npm run lint && npm run format",
+    "dev": "echo \"Load as unpacked extension in Chrome for development\"",
+    "package": "zip -r transcript-styler-v0.4.0-test.zip . -x node_modules/\\* .git/\\* .gitignore package-lock.json *.zip",
+    "clean": "rm -rf node_modules package-lock.json *.zip"
+  },
+  "keywords": [
+    "transcripts",
+    "styler",
+    "ai",
+    "llm",
+    "tts",
+    "chrome-extension",
+    "openai",
+    "anthropic",
+    "accessibility"
+  ],
+  "author": {
+    "name": "Transcript Styler Team",
+    "email": "support@transcripts-styler.com",
+    "url": "https://github.com/yourusername/youtube-transcript-styler"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/helix4u/Transcripts-Styler.git"
+  },
+  "bugs": {
+    "url": "https://github.com/helix4u/Transcripts-Styler/issues"
+  },
+  "homepage": "https://github.com/helix4u/Transcripts-Styler#readme",
+  "engines": {
+    "node": ">=14.0.0",
+    "npm": ">=6.0.0"
+  },
+  "devDependencies": {
+    "eslint": "^8.0.0",
+    "eslint-config-standard": "^17.0.0",
+    "eslint-plugin-import": "^2.25.0",
+    "eslint-plugin-n": "^15.0.0",
+    "eslint-plugin-promise": "^6.0.0",
+    "prettier": "^3.0.0"
+  },
+  "browserslist": [
+    "Chrome >= 88"
+  ],
+  "manifest": {
+    "version": "0.4.0-test",
+    "permissions": [
+      "storage"
+    ],
+    "host_permissions": [
+      "<all_urls>"
+    ]
+  },
+  "features": {
+    "transcript_extraction": true,
+    "ai_restyling": true,
+    "multiple_llm_providers": true,
+    "tts_support": true,
+    "export_formats": [
+      "txt",
+      "srt",
+      "vtt",
+      "json"
+    ],
+    "themes": [
+      "dark",
+      "light",
+      "system"
+    ],
+    "languages": "multi",
+    "ascii_sanitization": true,
+    "preset_management": true,
+    "debug_logging": true
+  },
+  "supported_providers": {
+    "llm": [
+      "openai",
+      "anthropic",
+      "openai-compatible"
+    ],
+    "tts": [
+      "openai",
+      "azure",
+      "browser",
+      "kokoro-fastapi"
+    ]
+  },
+  "chrome_extension": {
+    "manifest_version": 3,
+    "minimum_chrome_version": "88",
+    "permissions_justification": {
+      "storage": "Save user preferences and presets locally",
+      "host_permissions": "Fetch YouTube transcripts and communicate with AI APIs"
+    }
+  }
+}

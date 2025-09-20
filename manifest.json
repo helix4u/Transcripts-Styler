@@ -1,27 +1,39 @@
 {
   "manifest_version": 3,
-  "name": "YouTube Transcript Restyler Overlay (Test)",
+  "name": "Transcript Styler",
   "version": "0.4.0-test",
-  "description": "Overlay for youtube.com: fetch captions, restyle with an LLM, optional TTS. Test build with logging.",
-  "permissions": ["scripting", "storage"],
+  "description": "Extract, restyle, and enhance transcripts with AI. Supports multiple LLM providers and TTS options.",
+  
+  "permissions": [
+    "storage"
+  ],
+  
   "host_permissions": [
-    "https://www.youtube.com/*",
-    "https://m.youtube.com/*",
-    "https://video.google.com/*",
-    "http://localhost/*",
-    "https://api.openai.com/*",
-    "https://api.anthropic.com/*",
     "<all_urls>"
   ],
-  "content_scripts": [
-    {
-      "matches": ["https://www.youtube.com/*", "https://m.youtube.com/*"],
-      "js": ["content.js"],
-      "css": ["overlay.css"],
-      "run_at": "document_idle"
-    }
-  ],
+  
   "background": {
     "service_worker": "background.js"
+  },
+  
+  "content_scripts": [
+    {
+      "matches": ["*://*.youtube.com/*"],
+      "js": ["content.js"],
+      "css": ["overlay.css"],
+      "run_at": "document_end"
+    }
+  ],
+  
+  "action": {
+    "default_title": "Transcript Styler",
+    "default_popup": ""
+  },
+  
+  "icons": {
+    "16": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTYiIGhlaWdodD0iMTYiIHZpZXdCb3g9IjAgMCAxNiAxNiIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZD0iTTIgM0gxNFYxM0gyVjNaIiBzdHJva2U9IiMzMzMiIGZpbGw9IiNmZmYiLz4KPHN0cm9rZSB3aWR0aD0iMSIvPgo8L3N2Zz4K",
+    "32": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMzIiIGhlaWdodD0iMzIiIHZpZXdCb3g9IjAgMCAzMiAzMiIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZD0iTTQgNkgyOFYyNkg0VjZaIiBzdHJva2U9IiMzMzMiIGZpbGw9IiNmZmYiLz4KPHN0cm9rZSB3aWR0aD0iMiIvPgo8L3N2Zz4K",
+    "48": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDgiIGhlaWdodD0iNDgiIHZpZXdCb3g9IjAgMCA0OCA0OCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZD0iTTYgOUg0MlYzOUg2VjlaIiBzdHJva2U9IiMzMzMiIGZpbGw9IiNmZmYiLz4KPHN0cm9rZSB3aWR0aD0iMyIvPgo8L3N2Zz4K",
+    "128": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTI4IiBoZWlnaHQ9IjEyOCIgdmlld0JveD0iMCAwIDEyOCAxMjgiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxwYXRoIGQ9Ik0xNiAyNEgxMTJWMTA0SDE2VjI0WiIgc3Ryb2tlPSIjMzMzIiBmaWxsPSIjZmZmIi8+CjxzdHJva2Ugd2lkdGg9IjgiLz4KPC9zdmc+Cg=="
   }
 }
