@@ -53,26 +53,87 @@ async function arrayBufferToBase64(buffer) {
   return btoa(binary);
 }
 
-// ASCII sanitization for OpenAI logit bias
-// Note: Character list reconstructed from corrupted source - may need refinement
-const STR_KEYS = [
-  'â', 'ã', 'ä', 'å', 'æ', 'ç', 'è', 'é', 'ê', 'ë', 'ì', 'í', 'î', 'ï',
-  'ð', 'ñ', 'ò', 'ó', 'ô', 'õ', 'ö', 'ø', 'ù', 'ú', 'û', 'ü', 'ý', 'þ',
-  'ÿ', 'À', 'Á', 'Â', 'Ã', 'Ä', 'Å', 'Æ', 'Ç', 'È', 'É', 'Ê', 'Ë', 'Ì',
-  'Í', 'Î', 'Ï', 'Ð', 'Ñ', 'Ò', 'Ó', 'Ô', 'Õ', 'Ö', 'Ø', 'Ù', 'Ú', 'Û',
-  'Ü', 'Ý', 'Þ', '\u2013', '\u2014', '\u2018', '\u2019', '\u201C', '\u201D', '\u2026', '\u2022', '\u2122', '\u00A9', '\u00AE', '\u00A7',
-  '\u00B6', '\u2020', '\u2021', '\u2030', '\u2039', '\u203A', '\u00AB', '\u00BB', '\u00A1', '\u00BF', '\u00A2', '\u00A3', '\u00A4', '\u00A5', '\u00A6',
-  '\u00A8', '\u00A9', '\u00AA', '\u00AC', '\u00AE', '\u00AF', '\u00B0', '\u00B1', '\u00B2', '\u00B3', '\u00B4', '\u00B5', '\u00B6', '\u00B7', '\u00B8',
-  '\u00B9', '\u00BA', '\u00BB', '\u00BC', '\u00BD', '\u00BE', '\u00BF', '\u00D7', '\u00F7'
-];
+const abortControllers = new Map();
+const batchControllers = new Map();
+const requestToBatch = new Map();
 
-function openaiAsciiLogitBias(asciiOnly) {
-  if (!asciiOnly) return undefined;
-  const bias = {};
-  STR_KEYS.forEach(char => {
-    bias[char] = -100;
+function registerAbortController(batchId, requestId) {
+  const controller = new AbortController();
+  if (requestId) {
+    abortControllers.set(requestId, controller);
+    if (batchId) {
+      let set = batchControllers.get(batchId);
+      if (!set) {
+        set = new Set();
+        batchControllers.set(batchId, set);
+      }
+      set.add(requestId);
+      requestToBatch.set(requestId, batchId);
+    }
+  }
+  return controller;
+}
+
+function releaseAbortController(requestId) {
+  if (!requestId) return;
+  const controller = abortControllers.get(requestId);
+  if (!controller) return;
+  abortControllers.delete(requestId);
+  const batchId = requestToBatch.get(requestId);
+  requestToBatch.delete(requestId);
+  if (batchId) {
+    const set = batchControllers.get(batchId);
+    if (set) {
+      set.delete(requestId);
+      if (set.size === 0) {
+        batchControllers.delete(batchId);
+      }
+    }
+  }
+}
+
+function abortByRequestId(requestId) {
+  const controller = abortControllers.get(requestId);
+  if (!controller) return false;
+  controller.abort();
+  releaseAbortController(requestId);
+  return true;
+}
+
+function abortBatch(batchId) {
+  const set = batchControllers.get(batchId);
+  if (!set) return 0;
+  const requestIds = Array.from(set);
+  let count = 0;
+  requestIds.forEach(id => {
+    if (abortByRequestId(id)) {
+      count += 1;
+    }
   });
-  return bias;
+  return count;
+}
+
+const DEFAULT_ANTHROPIC_VERSION = '2023-06-01';
+
+function handleAbortRequests(data, sendResponse) {
+  const payload = data || {};
+  const { batchId, requestIds = [] } = payload;
+  let aborted = 0;
+
+  if (Array.isArray(requestIds)) {
+    requestIds.forEach(id => {
+      if (abortByRequestId(id)) {
+        aborted += 1;
+      }
+    });
+  }
+
+  if (batchId) {
+    aborted += abortBatch(batchId);
+  }
+
+  log(`Abort requested: batch=${batchId || 'none'}, aborted=${aborted}`);
+  sendResponse({ success: true, aborted });
 }
 
 // Message handler
@@ -108,6 +169,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     case 'SET_PREFS':
       handleSetPrefs(data, sendResponse);
       return true; // async response
+
+    case 'ABORT_REQUESTS':
+      handleAbortRequests(data, sendResponse);
+      return false;
 
     default:
       log(`Unknown action: ${action}`);
@@ -190,11 +255,24 @@ async function handleFetchTranscript(data, sendResponse) {
 }
 
 // LLM call handler
+
 async function handleLLMCall(data, sendResponse) {
   const start = Date.now();
+  const {
+    provider,
+    baseUrl,
+    apiKey,
+    model,
+    systemPrompt,
+    userPrompt,
+    asciiOnly = false,
+    requestId,
+    batchId,
+    anthropicVersion
+  } = data;
+  const controller = registerAbortController(batchId, requestId);
+
   try {
-    const { provider, baseUrl, apiKey, model, systemPrompt, userPrompt, asciiOnly = false } = data;
-    
     if (!provider || !baseUrl || !apiKey || !model || !userPrompt) {
       throw new Error('Missing required parameters');
     }
@@ -202,20 +280,44 @@ async function handleLLMCall(data, sendResponse) {
     log(`LLM call: provider=${provider}, model=${model}, baseUrl=${safeUrl(baseUrl)}, asciiOnly=${asciiOnly}`);
 
     let response;
-    
+
     switch (provider) {
       case 'openai':
-        response = await callOpenAI(baseUrl, apiKey, model, systemPrompt, userPrompt, asciiOnly);
+        response = await callOpenAI(
+          baseUrl,
+          apiKey,
+          model,
+          systemPrompt,
+          userPrompt,
+          asciiOnly,
+          controller.signal
+        );
         break;
-        
+
       case 'anthropic':
-        response = await callAnthropic(baseUrl, apiKey, model, systemPrompt, userPrompt);
+        response = await callAnthropic(
+          baseUrl,
+          apiKey,
+          model,
+          systemPrompt,
+          userPrompt,
+          anthropicVersion || DEFAULT_ANTHROPIC_VERSION,
+          controller.signal
+        );
         break;
-        
+
       case 'openai-compatible':
-        response = await callOpenAICompatible(baseUrl, apiKey, model, systemPrompt, userPrompt, asciiOnly);
+        response = await callOpenAICompatible(
+          baseUrl,
+          apiKey,
+          model,
+          systemPrompt,
+          userPrompt,
+          asciiOnly,
+          controller.signal
+        );
         break;
-        
+
       default:
         throw new Error(`Unsupported provider: ${provider}`);
     }
@@ -223,20 +325,33 @@ async function handleLLMCall(data, sendResponse) {
     log(`LLM call completed in ${Date.now() - start}ms`);
     sendResponse({ success: true, data: response });
   } catch (error) {
-    logError('LLM_CALL failed:', error.message);
-    sendResponse({ success: false, error: error.message });
+    if (error.name === 'AbortError') {
+      log(`LLM call aborted for request ${requestId || 'n/a'}`);
+      sendResponse({ success: false, error: 'Request aborted', aborted: true });
+    } else {
+      logError('LLM_CALL failed:', error.message);
+      sendResponse({ success: false, error: error.message });
+    }
+  } finally {
+    releaseAbortController(requestId);
   }
 }
 
+
 // OpenAI API call
-async function callOpenAI(baseUrl, apiKey, model, systemPrompt, userPrompt, asciiOnly) {
+
+async function callOpenAI(baseUrl, apiKey, model, systemPrompt, userPrompt, asciiOnly, signal) {
   const url = `${slashTrim(baseUrl)}/v1/chat/completions`;
-  
+
   const messages = [];
   if (systemPrompt) {
     messages.push({ role: 'system', content: systemPrompt });
   }
   messages.push({ role: 'user', content: userPrompt });
+
+  if (asciiOnly) {
+    log('ASCII-only mode active via prompt constraints for OpenAI');
+  }
 
   const body = {
     model,
@@ -245,20 +360,14 @@ async function callOpenAI(baseUrl, apiKey, model, systemPrompt, userPrompt, asci
     temperature: 0.7
   };
 
-  // Add logit bias for ASCII-only mode
-  const logitBias = openaiAsciiLogitBias(asciiOnly);
-  if (logitBias) {
-    body.logit_bias = logitBias;
-    log(`Applied ASCII logit bias with ${Object.keys(logitBias).length} entries`);
-  }
-
   const response = await fetch(url, {
     method: 'POST',
     headers: {
       'Authorization': `Bearer ${apiKey}`,
       'Content-Type': 'application/json'
     },
-    body: JSON.stringify(body)
+    body: JSON.stringify(body),
+    signal
   });
 
   if (!response.ok) {
@@ -270,14 +379,24 @@ async function callOpenAI(baseUrl, apiKey, model, systemPrompt, userPrompt, asci
   return result.choices?.[0]?.message?.content || 'No response';
 }
 
+
 // Anthropic API call
-async function callAnthropic(baseUrl, apiKey, model, systemPrompt, userPrompt) {
+
+async function callAnthropic(baseUrl, apiKey, model, systemPrompt, userPrompt, version, signal) {
   const url = `${slashTrim(baseUrl)}/v1/messages`;
-  
+  const resolvedVersion = version || DEFAULT_ANTHROPIC_VERSION;
+  log(`Anthropic call using version ${resolvedVersion}`);
+
   const body = {
     model,
     max_tokens: 1000,
-    messages: [{ role: 'user', content: userPrompt }]
+    temperature: 0.7,
+    messages: [
+      {
+        role: 'user',
+        content: [{ type: 'text', text: userPrompt }]
+      }
+    ]
   };
 
   if (systemPrompt) {
@@ -289,9 +408,10 @@ async function callAnthropic(baseUrl, apiKey, model, systemPrompt, userPrompt) {
     headers: {
       'x-api-key': apiKey,
       'Content-Type': 'application/json',
-      'anthropic-version': '2023-06-01'
+      'anthropic-version': resolvedVersion
     },
-    body: JSON.stringify(body)
+    body: JSON.stringify(body),
+    signal
   });
 
   if (!response.ok) {
@@ -300,18 +420,29 @@ async function callAnthropic(baseUrl, apiKey, model, systemPrompt, userPrompt) {
   }
 
   const result = await response.json();
-  return result.content?.[0]?.text || 'No response';
+  const textParts = (result.content || [])
+    .filter(part => part.type === 'text' && part.text)
+    .map(part => part.text.trim())
+    .filter(Boolean);
+
+  return textParts.join('\n').trim() || 'No response';
 }
 
+
 // OpenAI-compatible API call
-async function callOpenAICompatible(baseUrl, apiKey, model, systemPrompt, userPrompt, asciiOnly) {
+
+async function callOpenAICompatible(baseUrl, apiKey, model, systemPrompt, userPrompt, asciiOnly, signal) {
   const url = `${slashTrim(baseUrl)}/v1/chat/completions`;
-  
+
   const messages = [];
   if (systemPrompt) {
     messages.push({ role: 'system', content: systemPrompt });
   }
   messages.push({ role: 'user', content: userPrompt });
+
+  if (asciiOnly) {
+    log('ASCII-only mode active via prompt constraints for OpenAI-compatible provider');
+  }
 
   const body = {
     model,
@@ -320,62 +451,71 @@ async function callOpenAICompatible(baseUrl, apiKey, model, systemPrompt, userPr
     temperature: 0.7
   };
 
-  // Some providers may support logit_bias
-  const logitBias = openaiAsciiLogitBias(asciiOnly);
-  if (logitBias) {
-    body.logit_bias = logitBias;
-    log(`Applied ASCII logit bias to OpenAI-compatible provider`);
-  }
-
   const response = await fetch(url, {
     method: 'POST',
     headers: {
       'Authorization': `Bearer ${apiKey}`,
       'Content-Type': 'application/json'
     },
-    body: JSON.stringify(body)
+    body: JSON.stringify(body),
+    signal
   });
 
   if (!response.ok) {
     const errorText = await response.text();
-    throw new Error(`API error: ${response.status} ${errorText}`);
+    throw new Error(`OpenAI-compatible API error: ${response.status} ${errorText}`);
   }
 
   const result = await response.json();
   return result.choices?.[0]?.message?.content || 'No response';
 }
 
+
 // TTS handler
+
 async function handleTTSSpeak(data, sendResponse) {
   const start = Date.now();
+  const {
+    provider,
+    text,
+    voice,
+    baseUrl,
+    apiKey,
+    azureRegion,
+    format = 'mp3',
+    requestId,
+    batchId
+  } = data;
+  const controller = registerAbortController(batchId, requestId);
+
   try {
-    const { provider, text, voice, baseUrl, apiKey, azureRegion } = data;
-    
     if (!provider || !text) {
       throw new Error('Provider and text required');
     }
 
-    log(`TTS request: provider=${provider}, voice=${voice || 'default'}, textLength=${text.length}`);
+    log(
+      `TTS request: provider=${provider}, voice=${voice || 'default'}, format=${format}, textLength=${text.length}`
+    );
 
     let result;
-    
+
     switch (provider) {
       case 'openai':
-        result = await ttsOpenAI(baseUrl, apiKey, text, voice);
+        result = await ttsOpenAI(baseUrl, apiKey, text, voice, format, controller.signal);
         break;
-        
+
       case 'openai-compatible':
-        result = await ttsOpenAICompatible(baseUrl, apiKey, text, voice);
+        result = await ttsOpenAICompatible(baseUrl, apiKey, text, voice, format, controller.signal);
         break;
-        
+
       case 'kokoro':
-        result = await ttsKokoro(baseUrl, text, voice);
+        result = await ttsKokoro(baseUrl, text, voice, controller.signal);
         break;
-        
+
       case 'azure':
-        result = await ttsAzure(apiKey, azureRegion, text, voice);
+        result = await ttsAzure(apiKey, azureRegion, text, voice, controller.signal);
         break;
-        
+
       default:
         throw new Error(`Unsupported TTS provider: ${provider}`);
     }
@@ -383,15 +523,37 @@ async function handleTTSSpeak(data, sendResponse) {
     log(`TTS completed in ${Date.now() - start}ms, audioSize=${result.audioData?.length || 0}`);
     sendResponse({ success: true, data: result });
   } catch (error) {
-    logError('TTS_SPEAK failed:', error.message);
-    sendResponse({ success: false, error: error.message });
+    if (error.name === 'AbortError') {
+      log(`TTS request aborted for ${requestId || 'n/a'}`);
+      sendResponse({ success: false, error: 'Request aborted', aborted: true });
+    } else {
+      logError('TTS_SPEAK failed:', error.message);
+      sendResponse({ success: false, error: error.message });
+    }
+  } finally {
+    releaseAbortController(requestId);
   }
 }
 
+
 // OpenAI TTS
-async function ttsOpenAI(baseUrl, apiKey, text, voice = 'alloy') {
+
+async function ttsOpenAI(baseUrl, apiKey, text, voice = 'alloy', format = 'mp3', signal) {
   const url = `${slashTrim(baseUrl)}/v1/audio/speech`;
-  
+  const normalizedFormat = (format || 'mp3').toLowerCase();
+  const responseFormatMap = {
+    mp3: 'mp3',
+    wav: 'wav',
+    ogg: 'ogg'
+  };
+  const responseFormat = responseFormatMap[normalizedFormat] || 'mp3';
+  const fallbackMimeMap = {
+    mp3: 'audio/mpeg',
+    wav: 'audio/wav',
+    ogg: 'audio/ogg'
+  };
+  const fallbackMime = fallbackMimeMap[normalizedFormat] || 'audio/mpeg';
+
   const response = await fetch(url, {
     method: 'POST',
     headers: {
@@ -401,8 +563,10 @@ async function ttsOpenAI(baseUrl, apiKey, text, voice = 'alloy') {
     body: JSON.stringify({
       model: 'tts-1',
       input: text,
-      voice: voice
-    })
+      voice: voice || 'alloy',
+      response_format: responseFormat
+    }),
+    signal
   });
 
   if (!response.ok) {
@@ -412,15 +576,30 @@ async function ttsOpenAI(baseUrl, apiKey, text, voice = 'alloy') {
 
   const arrayBuffer = await response.arrayBuffer();
   const base64 = await arrayBufferToBase64(arrayBuffer);
-  const mime = pickMime(response);
+  const mime = pickMime(response) || fallbackMime;
 
   return { audioData: base64, mime };
 }
 
+
 // OpenAI-compatible TTS
-async function ttsOpenAICompatible(baseUrl, apiKey, text, voice = 'default') {
+
+async function ttsOpenAICompatible(baseUrl, apiKey, text, voice = 'default', format = 'mp3', signal) {
   const url = `${slashTrim(baseUrl)}/v1/audio/speech`;
-  
+  const normalizedFormat = (format || 'mp3').toLowerCase();
+  const responseFormatMap = {
+    mp3: 'mp3',
+    wav: 'wav',
+    ogg: 'ogg'
+  };
+  const responseFormat = responseFormatMap[normalizedFormat] || 'mp3';
+  const fallbackMimeMap = {
+    mp3: 'audio/mpeg',
+    wav: 'audio/wav',
+    ogg: 'audio/ogg'
+  };
+  const fallbackMime = fallbackMimeMap[normalizedFormat] || 'audio/mpeg';
+
   const response = await fetch(url, {
     method: 'POST',
     headers: {
@@ -430,26 +609,30 @@ async function ttsOpenAICompatible(baseUrl, apiKey, text, voice = 'default') {
     body: JSON.stringify({
       model: 'tts-1',
       input: text,
-      voice: voice
-    })
+      voice: voice || 'default',
+      response_format: responseFormat
+    }),
+    signal
   });
 
   if (!response.ok) {
     const errorText = await response.text();
-    throw new Error(`TTS API error: ${response.status} ${errorText}`);
+    throw new Error(`OpenAI-compatible TTS error: ${response.status} ${errorText}`);
   }
 
   const arrayBuffer = await response.arrayBuffer();
   const base64 = await arrayBufferToBase64(arrayBuffer);
-  const mime = pickMime(response);
+  const mime = pickMime(response) || fallbackMime;
 
   return { audioData: base64, mime };
 }
 
+
 // Kokoro FastAPI TTS
-async function ttsKokoro(baseUrl, text, voice) {
+
+async function ttsKokoro(baseUrl, text, voice, signal) {
   const url = `${slashTrim(baseUrl)}/tts`;
-  
+
   const response = await fetch(url, {
     method: 'POST',
     headers: {
@@ -459,7 +642,8 @@ async function ttsKokoro(baseUrl, text, voice) {
       text: text,
       voice: voice || 'default',
       lang: 'en'
-    })
+    }),
+    signal
   });
 
   if (!response.ok) {
@@ -469,15 +653,17 @@ async function ttsKokoro(baseUrl, text, voice) {
 
   const arrayBuffer = await response.arrayBuffer();
   const base64 = await arrayBufferToBase64(arrayBuffer);
-  const mime = pickMime(response);
+  const mime = pickMime(response) || 'audio/mpeg';
 
   return { audioData: base64, mime };
 }
 
+
 // Azure TTS
-async function ttsAzure(apiKey, region, text, voice = 'en-US-AriaNeural') {
+
+async function ttsAzure(apiKey, region, text, voice = 'en-US-AriaNeural', signal) {
   const url = `https://${region}.tts.speech.microsoft.com/cognitiveservices/v1`;
-  
+
   const ssml = `
     <speak version='1.0' xml:lang='en-US'>
       <voice name='${voice}'>${text.replace(/[<>&'"]/g, (m) => {
@@ -494,7 +680,8 @@ async function ttsAzure(apiKey, region, text, voice = 'en-US-AriaNeural') {
       'Content-Type': 'application/ssml+xml',
       'X-Microsoft-OutputFormat': 'audio-16khz-128kbitrate-mono-mp3'
     },
-    body: ssml
+    body: ssml,
+    signal
   });
 
   if (!response.ok) {
@@ -504,9 +691,11 @@ async function ttsAzure(apiKey, region, text, voice = 'en-US-AriaNeural') {
 
   const arrayBuffer = await response.arrayBuffer();
   const base64 = await arrayBufferToBase64(arrayBuffer);
+  const mime = pickMime(response) || 'audio/mpeg';
 
-  return { audioData: base64, mime: 'audio/mpeg' };
+  return { audioData: base64, mime };
 }
+
 
 // Azure voices handler
 async function handleAzureVoices(data, sendResponse) {

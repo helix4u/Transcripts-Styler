@@ -3,19 +3,26 @@
   "name": "Transcript Styler",
   "version": "0.4.0-test",
   "description": "Extract, restyle, and enhance transcripts with AI. Supports multiple LLM providers and TTS options.",
-  
+
   "permissions": [
     "storage"
   ],
-  
+
   "host_permissions": [
+    "https://video.google.com/*",
+    "https://api.openai.com/*",
+    "https://api.anthropic.com/*",
+    "https://*.tts.speech.microsoft.com/*"
+  ],
+
+  "optional_host_permissions": [
     "<all_urls>"
   ],
-  
+
   "background": {
     "service_worker": "background.js"
   },
-  
+
   "content_scripts": [
     {
       "matches": ["*://*.youtube.com/*"],
@@ -24,16 +31,15 @@
       "run_at": "document_end"
     }
   ],
-  
+
   "action": {
-    "default_title": "Transcript Styler",
-    "default_popup": ""
+    "default_title": "Transcript Styler"
   },
-  
+
   "icons": {
-    "16": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTYiIGhlaWdodD0iMTYiIHZpZXdCb3g9IjAgMCAxNiAxNiIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZD0iTTIgM0gxNFYxM0gyVjNaIiBzdHJva2U9IiMzMzMiIGZpbGw9IiNmZmYiLz4KPHN0cm9rZSB3aWR0aD0iMSIvPgo8L3N2Zz4K",
-    "32": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMzIiIGhlaWdodD0iMzIiIHZpZXdCb3g9IjAgMCAzMiAzMiIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZD0iTTQgNkgyOFYyNkg0VjZaIiBzdHJva2U9IiMzMzMiIGZpbGw9IiNmZmYiLz4KPHN0cm9rZSB3aWR0aD0iMiIvPgo8L3N2Zz4K",
-    "48": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDgiIGhlaWdodD0iNDgiIHZpZXdCb3g9IjAgMCA0OCA0OCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZD0iTTYgOUg0MlYzOUg2VjlaIiBzdHJva2U9IiMzMzMiIGZpbGw9IiNmZmYiLz4KPHN0cm9rZSB3aWR0aD0iMyIvPgo8L3N2Zz4K",
-    "128": "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTI4IiBoZWlnaHQ9IjEyOCIgdmlld0JveD0iMCAwIDEyOCAxMjgiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxwYXRoIGQ9Ik0xNiAyNEgxMTJWMTA0SDE2VjI0WiIgc3Ryb2tlPSIjMzMzIiBmaWxsPSIjZmZmIi8+CjxzdHJva2Ugd2lkdGg9IjgiLz4KPC9zdmc+Cg=="
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
   }
 }

@@ -9,6 +9,10 @@ let transcriptData = [];
 let aborter = null;
 let UI_DEBUG = false;
 let lastPrefs = {};
+let activeBatchId = null;
+let lastTtsUrl = null;
+
+const wait = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 // Logging utilities
 function log(...args) {
@@ -110,6 +114,9 @@ overlay.innerHTML = `
           <option value="openai-compatible">OpenAI-Compatible</option>
         </select>
         <input type="text" id="yt-base-url" placeholder="Base URL" style="width: 45%;">
+      </div>
+      <div class="yt-controls" id="yt-anthropic-options" style="display: none;">
+        <input type="text" id="yt-anthropic-version" placeholder="Anthropic API version (e.g., 2023-06-01)" style="width: 100%;">
       </div>
       <div class="yt-controls">
         <input type="password" id="yt-api-key" placeholder="API Key (memory only)" style="width: 60%;">
@@ -247,6 +254,7 @@ const elements = {
   baseUrl: document.getElementById('yt-base-url'),
   apiKey: document.getElementById('yt-api-key'),
   model: document.getElementById('yt-model'),
+  anthropicVersion: document.getElementById('yt-anthropic-version'),
   concurrency: document.getElementById('yt-concurrency'),
   asciiOnly: document.getElementById('yt-ascii-only'),
   blocklist: document.getElementById('yt-blocklist'),
@@ -385,6 +393,7 @@ async function loadPrefs() {
         setIf(elements.provider, ytro_prefs.provider);
         setIf(elements.baseUrl, ytro_prefs.baseUrl);
         setIf(elements.model, ytro_prefs.model);
+        setIf(elements.anthropicVersion, ytro_prefs.anthropicVersion);
         setIf(elements.concurrency, ytro_prefs.concurrency);
         setIf(elements.stylePreset, ytro_prefs.stylePreset);
         setIf(elements.promptTemplate, ytro_prefs.promptTemplate);
@@ -400,6 +409,7 @@ async function loadPrefs() {
         setIf(elements.ttsRate, ytro_prefs.ttsRate);
         
         Object.assign(lastPrefs, ytro_prefs);
+        syncProviderUI();
         syncTtsUI();
       }
       
@@ -434,6 +444,7 @@ async function savePrefs() {
     provider: elements.provider.value,
     baseUrl: elements.baseUrl.value,
     model: elements.model.value,
+    anthropicVersion: elements.anthropicVersion.value,
     concurrency: parseInt(elements.concurrency.value) || 3,
     stylePreset: elements.stylePreset.value,
     promptTemplate: elements.promptTemplate.value,
@@ -485,6 +496,7 @@ function snapshotPreset() {
     provider: elements.provider.value,
     baseUrl: elements.baseUrl.value,
     model: elements.model.value,
+    anthropicVersion: elements.anthropicVersion.value,
     concurrency: parseInt(elements.concurrency.value) || 3,
     stylePreset: elements.stylePreset.value,
     promptTemplate: elements.promptTemplate.value,
@@ -508,6 +520,7 @@ function loadPreset(preset) {
   setIf(elements.provider, preset.provider);
   setIf(elements.baseUrl, preset.baseUrl);
   setIf(elements.model, preset.model);
+  setIf(elements.anthropicVersion, preset.anthropicVersion);
   setIf(elements.concurrency, preset.concurrency);
   setIf(elements.stylePreset, preset.stylePreset);
   setIf(elements.promptTemplate, preset.promptTemplate);
@@ -523,6 +536,7 @@ function loadPreset(preset) {
   setIf(elements.azureRegion, preset.azureRegion);
   setIf(elements.ttsRate, preset.ttsRate);
   
+  syncProviderUI();
   syncTtsUI();
   savePrefs();
 }
@@ -871,48 +885,85 @@ async function fetchTranscript() {
 }
 
 // LLM restyling
+
 async function restyleAll() {
   if (!transcriptData.length) {
     setError('No transcript data loaded');
     return;
   }
-  
-  const concurrency = parseInt(elements.concurrency.value) || 3;
+
+  const concurrencyValue = parseInt(elements.concurrency.value, 10) || 3;
+  const concurrency = Math.min(Math.max(concurrencyValue, 1), 10);
   const total = transcriptData.length;
   let completed = 0;
   let errors = 0;
-  
-  // Reset restyled text
+  const retryCounts = new Array(total).fill(0);
+  const retryQueue = [];
+  let nextIndex = 0;
+  let consecutive429 = 0;
+  let globalPauseUntil = 0;
+
+  const MAX_RETRIES = 3;
+  const BASE_BACKOFF_MS = 1000;
+  const MAX_BACKOFF_MS = 10000;
+  const GLOBAL_COOLDOWN_THRESHOLD = 3;
+  const GLOBAL_COOLDOWN_MS = 8000;
+
   transcriptData.forEach(segment => {
     delete segment.restyled;
+    delete segment.error;
   });
-  
-  // Create abort controller
+
   aborter = new AbortController();
-  
-  // Update UI
+  activeBatchId = `restyle-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
   elements.restyleBtn.disabled = true;
   elements.stopBtn.disabled = false;
-  
+
   const start = Date.now();
   setStatus('Starting restyle process...');
-  
-  // Worker pool
-  const pool = [];
-  for (let i = 0; i < concurrency; i++) {
-    pool.push(processSegment());
-  }
-  
-  let currentIndex = 0;
-  
-  async function processSegment() {
-    while (currentIndex < total && !aborter.signal.aborted) {
-      const index = currentIndex++;
+
+  const updateProgress = () => {
+    const parts = [`${completed}/${total} completed`];
+    if (errors > 0) {
+      parts.push(`${errors} errors`);
+    }
+    elements.progress.textContent = parts.join(' | ');
+  };
+
+  updateProgress();
+
+  const getNextIndex = () => {
+    if (retryQueue.length > 0) {
+      return retryQueue.shift();
+    }
+    if (nextIndex < total) {
+      return nextIndex++;
+    }
+    return undefined;
+  };
+
+  const workers = Array.from({ length: concurrency }, async () => {
+    while (!aborter.signal.aborted) {
+      const index = getNextIndex();
+      if (index === undefined) {
+        break;
+      }
+
       const segment = transcriptData[index];
-      
+      const prompt = buildPrompt(segment, index, transcriptData);
+      const requestId = `${activeBatchId}:${index}:${retryCounts[index]}`;
+
       try {
-        const prompt = buildPrompt(segment, index, transcriptData);
-        
+        const now = Date.now();
+        if (globalPauseUntil > now) {
+          await wait(globalPauseUntil - now);
+        }
+
+        if (aborter.signal.aborted) {
+          break;
+        }
+
         const response = await sendMessage('LLM_CALL', {
           provider: elements.provider.value,
           baseUrl: elements.baseUrl.value,
@@ -920,53 +971,88 @@ async function restyleAll() {
           model: elements.model.value,
           systemPrompt: '',
           userPrompt: prompt,
-          asciiOnly: elements.asciiOnly.checked
+          asciiOnly: elements.asciiOnly.checked,
+          batchId: activeBatchId,
+          requestId,
+          anthropicVersion: elements.anthropicVersion.value.trim()
         });
-        
-        if (response.success) {
-          let restyled = response.data;
-          
-          // Apply ASCII sanitization if enabled
-          if (elements.asciiOnly.checked) {
-            restyled = sanitizeAscii(restyled, elements.blocklist.value);
-          }
-          
-          segment.restyled = restyled;
-          completed++;
-          
-          // Update progress
-          elements.progress.textContent = `${completed}/${total} completed`;
-          
-          // Re-render periodically
-          if (completed % 5 === 0 || completed === total) {
-            renderList();
-          }
-        } else {
-          throw new Error(response.error);
+
+        if (aborter.signal.aborted || response.aborted) {
+          break;
+        }
+
+        if (!response.success) {
+          throw new Error(response.error || 'LLM call failed');
+        }
+
+        let restyled = response.data;
+        if (elements.asciiOnly.checked) {
+          restyled = sanitizeAscii(restyled, elements.blocklist.value);
+        }
+
+        segment.restyled = restyled;
+        delete segment.error;
+
+        completed += 1;
+        retryCounts[index] = 0;
+        consecutive429 = 0;
+
+        if (completed === 1) {
+          setStatus('Restyling in progress...');
+        }
+
+        updateProgress();
+
+        if (completed % 5 === 0 || completed === total) {
+          renderList();
         }
       } catch (error) {
-        if (error.message.includes('429')) {
-          // Rate limited - wait and retry
-          await new Promise(resolve => setTimeout(resolve, 1000));
-          currentIndex--; // Retry this segment
-          continue;
-        } else {
-          logError(`Failed to restyle segment ${index}:`, error);
-          errors++;
+        if (aborter.signal.aborted) {
+          break;
         }
+
+        const message = error?.message || String(error);
+
+        if (/429|rate limit/i.test(message)) {
+          const attempt = retryCounts[index];
+          if (attempt < MAX_RETRIES) {
+            retryCounts[index] = attempt + 1;
+            const delay = Math.min(BASE_BACKOFF_MS * Math.pow(2, attempt), MAX_BACKOFF_MS);
+            const attemptNumber = attempt + 2;
+            const totalAttempts = MAX_RETRIES + 1;
+            setStatus(`Rate limited. Retrying segment ${index + 1} (attempt ${attemptNumber}/${totalAttempts})...`);
+            consecutive429 += 1;
+
+            if (consecutive429 >= GLOBAL_COOLDOWN_THRESHOLD) {
+              globalPauseUntil = Date.now() + GLOBAL_COOLDOWN_MS;
+              setStatus(`Rate limited. Cooling down for ${Math.round(GLOBAL_COOLDOWN_MS / 1000)}s...`);
+              consecutive429 = 0;
+            }
+
+            await wait(delay);
+            retryQueue.push(index);
+            continue;
+          }
+        } else {
+          consecutive429 = 0;
+        }
+
+        logError(`Failed to restyle segment ${index}:`, error);
+        segment.error = message;
+        errors += 1;
+        updateProgress();
       }
     }
-  }
-  
+  });
+
   try {
-    await Promise.all(pool);
-    
-    if (aborter.signal.aborted) {
+    await Promise.all(workers);
+
+    if (aborter?.signal?.aborted) {
       setStatus(`Restyle stopped: ${completed}/${total} completed`);
     } else {
       const duration = dur(start);
-      setStatus(`Restyle complete: ${completed}/${total} segments in ${duration}` + 
-                (errors > 0 ? `, ${errors} errors` : ''));
+      setStatus(`Restyle complete: ${completed}/${total} segments in ${duration}` + (errors > 0 ? `, ${errors} errors` : ''));
     }
   } catch (error) {
     setError(`Restyle failed: ${error.message}`);
@@ -975,14 +1061,27 @@ async function restyleAll() {
     elements.stopBtn.disabled = true;
     elements.progress.textContent = '';
     aborter = null;
+    activeBatchId = null;
     renderList();
   }
 }
 
+
 function stopRestyle() {
   if (aborter) {
     aborter.abort();
+    if (activeBatchId) {
+      sendMessage('ABORT_REQUESTS', { batchId: activeBatchId }).catch(logError);
+    }
     setStatus('Stopping restyle...');
+  }
+}
+
+function syncProviderUI() {
+  const isAnthropic = elements.provider.value === 'anthropic';
+  const container = document.getElementById('yt-anthropic-options');
+  if (container) {
+    container.style.display = isAnthropic ? 'block' : 'none';
   }
 }
 
@@ -1076,76 +1175,88 @@ function gatherTranscriptText() {
   return text;
 }
 
+
 async function generateTTS() {
   if (!elements.ttsEnabled.checked) {
     setError('TTS is disabled');
     return;
   }
-  
+
   const text = gatherTranscriptText();
   if (!text) {
     setError('No transcript text available');
     return;
   }
-  
+
   const provider = elements.ttsProvider.value;
-  
+  const format = (elements.ttsFormat.value || 'mp3').toLowerCase();
+
   try {
     setStatus('Generating TTS audio...');
-    
+
     if (provider === 'browser') {
       generateBrowserTTS(text);
       return;
     }
-    
-    // For other providers, use background service
+
     const data = {
       provider,
-      text: text.substring(0, 4000), // Limit text length
+      format,
+      text: text.substring(0, 4000),
       baseUrl: elements.baseUrl.value,
       apiKey: elements.apiKey.value
     };
-    
+
     if (provider === 'azure') {
       data.azureRegion = elements.azureRegion.value;
       data.voice = elements.azureVoiceSelect.value || elements.ttsVoice.value;
     } else {
       data.voice = elements.ttsVoice.value;
     }
-    
+
     const response = await sendMessage('TTS_SPEAK', data);
-    
-    if (!response.success) {
-      throw new Error(response.error);
+
+    if (response.aborted) {
+      setStatus('TTS request cancelled');
+      return;
     }
-    
+
+    if (!response.success) {
+      throw new Error(response.error || 'TTS request failed');
+    }
+
     const { audioData, mime } = response.data;
-    
-    // Create blob URL and play audio
     const binaryString = atob(audioData);
     const bytes = new Uint8Array(binaryString.length);
     for (let i = 0; i < binaryString.length; i++) {
       bytes[i] = binaryString.charCodeAt(i);
     }
-    
-    const blob = new Blob([bytes], { type: mime });
+
+    const blob = new Blob([bytes], { type: mime || 'audio/mpeg' });
+    if (lastTtsUrl) {
+      URL.revokeObjectURL(lastTtsUrl);
+    }
     const url = URL.createObjectURL(blob);
-    
+    lastTtsUrl = url;
+
     elements.ttsAudio.src = url;
     elements.ttsAudio.style.display = 'block';
     elements.downloadTtsBtn.style.display = 'inline-block';
     elements.downloadTtsBtn.onclick = () => {
       const a = document.createElement('a');
       a.href = url;
-      a.download = `transcript-tts.${mime.split('/')[1] || 'mp3'}`;
+      const extension = (mime && mime.includes('/')) ? mime.split('/')[1] : format;
+      a.download = `transcript-tts.${extension || 'mp3'}`;
       a.click();
     };
-    
+
     setStatus('TTS audio generated successfully');
   } catch (error) {
-    setError(`TTS generation failed: ${error.message}`);
+    logError('TTS generation failed:', error);
+    setError(`TTS failed: ${error.message}`);
   }
 }
+
 
 function generateBrowserTTS(text) {
   if (!window.speechSynthesis) {
@@ -1222,24 +1333,53 @@ function exportSRT() {
   setStatus('SRT export completed');
 }
 
+
 function exportVTT() {
   if (!transcriptData.length) {
     setError('No transcript data to export');
     return;
   }
-  
+
+  const DEFAULT_DURATION = 2;
+  const MIN_GAP = 0.1;
+  let lastEnd = 0;
+
   let content = 'WEBVTT\n\n';
-  content += transcriptData.map(segment => {
-    const text = segment.restyled || segment.text;
-    const start = formatVTTTime(segment.start || 0);
-    const end = formatVTTTime(segment.end || 0);
-    
-    return `${start} --> ${end}\n${text}\n`;
-  }).join('\n');
-  
-  downloadText(content, 'transcript.vtt');
+
+
+  transcriptData.forEach((segment, index) => {
+    const text = segment.restyled || segment.text || '';
+    const next = transcriptData[index + 1];
+
+    const startSeconds = typeof segment.start === 'number'
+      ? segment.start
+      : lastEnd;
+
+    let endSeconds;
+    if (typeof segment.end === 'number') {
+      endSeconds = segment.end;
+    } else if (next && typeof next.start === 'number') {
+      endSeconds = Math.max(next.start - MIN_GAP, startSeconds + MIN_GAP);
+    } else {
+      endSeconds = startSeconds + DEFAULT_DURATION;
+    }
+
+    if (endSeconds <= startSeconds) {
+      endSeconds = startSeconds + MIN_GAP;
+    }
+
+    lastEnd = endSeconds;
+
+    content += `${formatVTTTime(startSeconds)} --> ${formatVTTTime(endSeconds)}
+${text}
+
+`;
+  });
+
+  downloadText(content.trimEnd(), 'transcript.vtt', 'text/vtt');
   setStatus('VTT export completed');
 }
+
 
 function exportJSON() {
   if (!transcriptData.length) {
@@ -1362,6 +1502,7 @@ elements.outputLang.addEventListener('change', () => {
 
 elements.restyleBtn.addEventListener('click', restyleAll);
 elements.stopBtn.addEventListener('click', stopRestyle);
+elements.provider.addEventListener('change', syncProviderUI);
 
 elements.ttsProvider.addEventListener('change', syncTtsUI);
 elements.azureVoicesBtn.addEventListener('click', listAzureVoices);
@@ -1383,7 +1524,7 @@ elements.searchInput.addEventListener('input', () => {
 // Auto-save preferences on input changes
 [
   elements.videoId, elements.langPrefs, elements.outputLang, elements.customLang,
-  elements.provider, elements.baseUrl, elements.model, elements.concurrency,
+  elements.provider, elements.baseUrl, elements.model, elements.anthropicVersion, elements.concurrency,
   elements.stylePreset, elements.promptTemplate, elements.asciiOnly, elements.blocklist,
   elements.ttsEnabled, elements.ttsProvider, elements.ttsVoice, elements.ttsFormat,
   elements.azureRegion, elements.ttsRate
@@ -1395,6 +1536,8 @@ elements.searchInput.addEventListener('input', () => {
     }
   }
 });
+
+syncProviderUI();
 
 // Drag functionality
 let isDragging = false;
