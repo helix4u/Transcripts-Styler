@@ -317,12 +317,8 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
     // Stop any currently playing TTS
     const currentAudio = elements.ttsAudio;
     if (currentAudio) {
-      try {
-        currentAudio.pause();
-        currentAudio.currentTime = 0;
-      } catch (_) {
-        /* ignore pause errors */
-      }
+      currentAudio.pause();
+      currentAudio.currentTime = 0;
     }
 
     try {
@@ -342,89 +338,79 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
 
       // Handle browser TTS directly in content script
       if (prefs.ttsProvider === 'browser') {
-        if (!('speechSynthesis' in window)) {
-          setError('Browser TTS not supported in this environment');
-          return;
-        }
-
-        const cleanText = textToSpeak.trim();
-        if (!cleanText) {
-          setStatus('No text to speak');
-          return;
-        }
-
-        log(
-          `Browser TTS: Speaking text (${cleanText.length} chars): "${cleanText.substring(0, 50)}${
-            cleanText.length > 50 ? '...' : ''
-          }"`
-        );
-
-        if (browserTtsActive || window.speechSynthesis.speaking) {
-          log('Browser TTS already speaking; queuing next utterance');
-        }
-
-        return new Promise(resolve => {
-          const finish = () => {
-            browserTtsActive = false;
-            updateStopButtonVisibility();
-            resolve();
-          };
-
+        // Use browser's built-in TTS
+        if ('speechSynthesis' in window) {
+          // Stop any current speech
+          window.speechSynthesis.cancel();
+          
+          // Ensure text is properly encoded for Unicode
+          const cleanText = textToSpeak.trim();
+          if (!cleanText) {
+            setStatus('No text to speak');
+            return;
+          }
+          
+          log(`Browser TTS: Speaking text (${cleanText.length} chars): "${cleanText.substring(0, 50)}${cleanText.length > 50 ? '...' : ''}"`);
+          
           const utterance = new SpeechSynthesisUtterance(cleanText);
-
+          
+          // Set language and voice with better Unicode support
           const voices = window.speechSynthesis.getVoices();
           let selectedVoice = null;
-
+          
           if (prefs.ttsVoice) {
+            // Try exact match first
             selectedVoice = voices.find(v => v.name === prefs.ttsVoice || v.voiceURI === prefs.ttsVoice);
-
+            
+            // If no exact match, try partial match for language
             if (!selectedVoice) {
               const languageCode = prefs.ttsVoice.toLowerCase();
-              selectedVoice = voices.find(
-                v => v.lang.toLowerCase().includes(languageCode) || v.name.toLowerCase().includes(languageCode)
+              selectedVoice = voices.find(v => 
+                v.lang.toLowerCase().includes(languageCode) || 
+                v.name.toLowerCase().includes(languageCode)
               );
             }
           }
-
+          
+          // Auto-detect language if no voice specified or found
           if (!selectedVoice) {
+            // Try to detect Japanese characters
             if (/[\u3040-\u309f\u30a0-\u30ff\u4e00-\u9faf]/.test(cleanText)) {
-              selectedVoice = voices.find(
-                v => v.lang.toLowerCase().includes('ja') || v.lang.toLowerCase().includes('japanese')
-              );
+              selectedVoice = voices.find(v => v.lang.toLowerCase().includes('ja') || v.lang.toLowerCase().includes('japanese'));
               if (selectedVoice) {
                 log(`Auto-selected Japanese voice: ${selectedVoice.name}`);
               }
-            } else if (/[\u4e00-\u9fff]/.test(cleanText)) {
-              selectedVoice = voices.find(
-                v => v.lang.toLowerCase().includes('zh') || v.lang.toLowerCase().includes('chinese')
-              );
+            }
+            // Try to detect Chinese characters
+            else if (/[\u4e00-\u9fff]/.test(cleanText)) {
+              selectedVoice = voices.find(v => v.lang.toLowerCase().includes('zh') || v.lang.toLowerCase().includes('chinese'));
               if (selectedVoice) {
                 log(`Auto-selected Chinese voice: ${selectedVoice.name}`);
               }
-            } else if (/[\uac00-\ud7af\u1100-\u11ff\u3130-\u318f]/.test(cleanText)) {
-              selectedVoice = voices.find(
-                v => v.lang.toLowerCase().includes('ko') || v.lang.toLowerCase().includes('korean')
-              );
+            }
+            // Try to detect Korean characters
+            else if (/[\uac00-\ud7af\u1100-\u11ff\u3130-\u318f]/.test(cleanText)) {
+              selectedVoice = voices.find(v => v.lang.toLowerCase().includes('ko') || v.lang.toLowerCase().includes('korean'));
               if (selectedVoice) {
                 log(`Auto-selected Korean voice: ${selectedVoice.name}`);
               }
-            } else if (/[\u0600-\u06ff]/.test(cleanText)) {
-              selectedVoice = voices.find(
-                v => v.lang.toLowerCase().includes('ar') || v.lang.toLowerCase().includes('arabic')
-              );
+            }
+            // Try to detect Arabic characters
+            else if (/[\u0600-\u06ff]/.test(cleanText)) {
+              selectedVoice = voices.find(v => v.lang.toLowerCase().includes('ar') || v.lang.toLowerCase().includes('arabic'));
               if (selectedVoice) {
                 log(`Auto-selected Arabic voice: ${selectedVoice.name}`);
               }
-            } else if (/[\u0400-\u04ff]/.test(cleanText)) {
-              selectedVoice = voices.find(
-                v => v.lang.toLowerCase().includes('ru') || v.lang.toLowerCase().includes('russian')
-              );
+            }
+            // Try to detect Cyrillic characters
+            else if (/[\u0400-\u04ff]/.test(cleanText)) {
+              selectedVoice = voices.find(v => v.lang.toLowerCase().includes('ru') || v.lang.toLowerCase().includes('russian'));
               if (selectedVoice) {
                 log(`Auto-selected Russian voice: ${selectedVoice.name}`);
               }
             }
           }
-
+          
           if (selectedVoice) {
             utterance.voice = selectedVoice;
             utterance.lang = selectedVoice.lang;
@@ -432,37 +418,33 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
           } else {
             log('No specific voice found, using default');
           }
-
+          
+          // Set rate
           utterance.rate = prefs.ttsRate || 1.0;
           utterance.pitch = 1.0;
           utterance.volume = 1.0;
-
-          utterance.onstart = () => {
-            browserTtsActive = true;
-            updateStopButtonVisibility();
-          };
-
-          utterance.onend = () => {
-            log('Browser TTS completed');
-            finish();
-          };
-
-          utterance.onerror = event => {
+          
+          // Add error handling
+          utterance.onerror = (event) => {
             logError('Browser TTS error:', event.error);
             setError(`TTS error: ${event.error}`);
-            finish();
           };
-
-          try {
-            window.speechSynthesis.speak(utterance);
-            setStatus(`Playing ${textType} text for segment ${segmentIndex + 1} (browser TTS)`);
-          } catch (error) {
-            logError('Failed to queue browser TTS:', error);
-            setError('Failed to start browser TTS');
-            finish();
-          }
-        });
+          
+          utterance.onend = () => {
+            log('Browser TTS completed');
+          };
+          
+          // Play the speech
+          window.speechSynthesis.speak(utterance);
+          
+          setStatus(`Playing ${textType} text for segment ${segmentIndex + 1} (browser TTS)`);
+          return;
+        } else {
+          setError('Browser TTS not supported in this environment');
+          return;
+        }
       }
+
       // Send TTS request to background script for other providers
       const response = await sendMessage('TTS_SPEAK', {
         text: textToSpeak,
@@ -476,66 +458,33 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
       });
 
       if (response.success && response.data && response.data.audioData) {
-        if (!currentAudio) {
-          setError('No audio element available for TTS playback');
-          return;
-        }
-
+        // Convert base64 audio data to blob URL
         const audioData = response.data.audioData;
         const mimeType = response.data.mime || 'audio/mpeg';
+        
+        // Convert base64 to blob
         const binaryString = atob(audioData);
         const bytes = new Uint8Array(binaryString.length);
-        for (let i = 0; i < binaryString.length; i += 1) {
+        for (let i = 0; i < binaryString.length; i++) {
           bytes[i] = binaryString.charCodeAt(i);
         }
         const blob = new Blob([bytes], { type: mimeType });
         const audioUrl = URL.createObjectURL(blob);
-
+        
         currentAudio.src = audioUrl;
+        currentAudio.play().catch(error => {
+          logError('Failed to play TTS audio:', error);
+          setStatus('Failed to play audio');
+        });
+        
+        // Show audio controls
         currentAudio.style.display = 'block';
         setStatus(`Playing ${textType} text for segment ${segmentIndex + 1}`);
-
-        await new Promise(resolve => {
-          let resolved = false;
-
-          const cleanup = () => {
-            if (resolved) return;
-            resolved = true;
-            currentAudio.removeEventListener('ended', onEnded);
-            currentAudio.removeEventListener('error', onError);
-            currentAudio.removeEventListener('pause', onPause);
-            URL.revokeObjectURL(audioUrl);
-            resolve();
-          };
-
-          const onEnded = () => {
-            cleanup();
-          };
-
-          const onError = event => {
-            logError('Failed to play TTS audio:', event?.error || event);
-            setStatus('Failed to play audio');
-            cleanup();
-          };
-
-          const onPause = () => {
-            if (!currentAudio.paused) {
-              return;
-            }
-            if (currentAudio.ended || currentAudio.currentTime === 0 || !currentAudio.src) {
-              cleanup();
-            }
-          };
-
-          currentAudio.addEventListener('ended', onEnded, { once: true });
-          currentAudio.addEventListener('error', onError, { once: true });
-          currentAudio.addEventListener('pause', onPause, { once: true });
-
-          const playPromise = currentAudio.play();
-          if (playPromise && typeof playPromise.catch === 'function') {
-            playPromise.catch(onError);
-          }
-        });
+        
+        // Clean up the blob URL when audio ends
+        currentAudio.addEventListener('ended', () => {
+          URL.revokeObjectURL(audioUrl);
+        }, { once: true });
       } else {
         setError(`TTS failed: ${response.error || 'Unknown error'}`);
       }
@@ -1120,9 +1069,7 @@ Context (next fragments):
     const video = getVideoElement();
     if (!video || videoListenerAttached) return;
     video.addEventListener('timeupdate', () => {
-      updateActiveSegment(video.currentTime || 0).catch(error => {
-        logError('Failed to update active segment:', error);
-      });
+      updateActiveSegment(video.currentTime || 0);
     });
     video.addEventListener('emptied', () => {
       resetSubtitleState();
@@ -1156,7 +1103,7 @@ Context (next fragments):
       : -1;
   }
 
-  async function updateActiveSegment(currentTime) {
+  function updateActiveSegment(currentTime) {
     if (!transcriptData.length) {
       resetSubtitleState();
       return;
@@ -1168,34 +1115,12 @@ Context (next fragments):
       applyActiveHighlight(true); // Enable auto-scroll
       if (index >= 0) {
         updateSubtitleText(transcriptData[index]);
-
+        
         // Auto-play TTS if enabled and this is a new segment
         if (autoTtsEnabled && index !== lastAutoTtsSegment && index < transcriptData.length) {
           lastAutoTtsSegment = index;
           const textType = elements.autoTtsType?.value || 'original';
-          const video = getVideoElement();
-          let pausedForTts = false;
-
-          if (video && !video.paused && !video.ended) {
-            try {
-              video.pause();
-              pausedForTts = true;
-            } catch (error) {
-              logError('Failed to pause video for auto TTS:', error);
-            }
-          }
-
-          try {
-            await playSegmentTTS(index, textType);
-          } catch (error) {
-            logError('Auto TTS playback failed:', error);
-          } finally {
-            if (video && pausedForTts) {
-              video.play().catch(() => {
-                /* ignore autoplay block */
-              });
-            }
-          }
+          playSegmentTTS(index, textType);
         }
       } else {
         updateSubtitleText(null);
