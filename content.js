@@ -399,7 +399,7 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
   };
 
   // Default values
-  const DEFAULT_PROMPT = `Restyle this closed-caption sentence fragment in {{style}} style. Output language: {{outlang}}. This input is a partial sentence from on-screen captions. Keep the meaning intact but improve clarity and readability for captions. Do not include timestamps, time ranges, or any numerals that are part of time markers; ignore them entirely. Do not add speaker names or extra content. If ASCII-only mode is enabled, use only standard ASCII characters (no accents, special punctuation, or Unicode symbols).
+  const DEFAULT_PROMPT = `Restyle this closed-caption sentence fragment in {{style}} style. Output language: {{outlang}}. This input is a partial sentence from on-screen captions. Keep the meaning intact but improve clarity and readability for captions. Keep sentence pacing etc. Just change verbiage and vibe. It will play alongside the youtube vid in CCs. Do not include timestamps, time ranges, or any numerals that are part of time markers; ignore them entirely. Do not add speaker names or extra content. If ASCII-only mode is enabled, use only standard ASCII characters (no accents, special punctuation, or Unicode symbols).
 
 Context (previous fragments):
 {{prevLines}}
