@@ -13,61 +13,11 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
   let activeSegmentIndex = -1;
   let videoListenerAttached = false;
   let subtitleOverlayEl = null;
+  let activeTtsRequestId = null;
+  let activeTtsBatchId = null;
+  let browserTtsActive = false;
 
   const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
-
-  function parsePlayerResponse() {
-    try {
-      const scripts = Array.from(document.querySelectorAll('script'));
-      for (const script of scripts) {
-        const marker = 'ytInitialPlayerResponse';
-        const index = script.textContent.indexOf(marker);
-        if (index === -1) continue;
-        const jsonStart = script.textContent.indexOf('{', index);
-        if (jsonStart === -1) continue;
-        let depth = 0;
-        for (let i = jsonStart; i < script.textContent.length; i += 1) {
-          const char = script.textContent[i];
-          if (char === '{') depth += 1;
-          else if (char === '}') {
-            depth -= 1;
-            if (depth === 0) {
-              const jsonText = script.textContent.slice(jsonStart, i + 1);
-              try {
-                return JSON.parse(jsonText);
-              } catch (error) {
-                logError('Failed to parse player JSON', error);
-                return null;
-              }
-            }
-          }
-        }
-      }
-    } catch (error) {
-      logError('parsePlayerResponse error', error);
-    }
-    return null;
-  }
-
-  function getTracksFromPlayer(videoId) {
-    const player = parsePlayerResponse();
-    const captionRenderer = player?.captions?.playerCaptionsTracklistRenderer?.captionTracks || [];
-    return captionRenderer
-      .map(track => {
-        const lang =
-          track.languageCode ||
-          track.vssId?.replace(/^\.?/, '') ||
-          track.baseUrl?.match(/[?&]lang=([^&]+)/)?.[1] ||
-          '';
-        const name =
-          track.name?.simpleText || (track.name?.runs || []).map(run => run.text).join('') || '';
-        const kind = track.kind || '';
-        const rawUrl = typeof track.baseUrl === 'string' ? track.baseUrl : '';
-        const baseUrl = rawUrl ? rawUrl.replace(/\u0026/g, '&') : '';
-        return { lang, name, kind, baseUrl, source: 'player', videoId };
-      })
-      .filter(track => track.lang || track.baseUrl);
-  }
 
   // Logging utilities
   function log(...args) {
@@ -139,6 +89,11 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
         <input type="text" id="yt-lang-prefs" placeholder="en,es,fr,de,ja" style="width: 100%;">
       </div>
       <div class="yt-controls">
+        <label>Font Size:</label>
+        <input type="number" id="yt-font-size" min="10" max="48" value="24" style="width: 70px;">
+        <span>px</span>
+      </div>
+      <div class="yt-controls">
         <label>Output Language:</label>
         <select id="yt-output-lang">
           <option value="English">English</option>
@@ -183,6 +138,13 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
         <label><input type="checkbox" id="yt-ascii-only"> ASCII-only output</label>
       </div>
       <div class="yt-controls">
+        <label>Max tokens:</label>
+        <input type="number" id="yt-max-tokens" min="64" max="320000" value="1000" style="width: 80px;">
+      </div>
+      <div class="yt-controls">
+        <label><input type="checkbox" id="yt-single-call"> Single-call restyle</label>
+      </div>
+      <div class="yt-controls">
         <label>ASCII Blocklist:</label>
         <input type="text" id="yt-blocklist" placeholder="Additional characters to avoid" style="width: 100%;">
       </div>
@@ -200,6 +162,9 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
           <option value="technical">Technical & Precise</option>
           <option value="custom">Custom</option>
         </select>
+      </div>
+      <div class="yt-controls" id="yt-style-text-row" style="display: none;">
+        <input type="text" id="yt-style-text" placeholder="Describe style (e.g., Cartman from South Park)" style="width: 100%;">
       </div>
       <textarea id="yt-prompt-template" rows="4" style="width: 100%;" placeholder="Custom prompt template..."></textarea>
       <div class="yt-controls">
@@ -247,6 +212,7 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
       </div>
       <div class="yt-controls">
         <button id="yt-generate-tts-btn">Generate TTS</button>
+        <button id="yt-stop-tts-btn" style="display: none;">Stop TTS</button>
         <button id="yt-download-tts-btn" style="display: none;">Download Audio</button>
       </div>
       <audio id="yt-tts-audio" controls style="width: 100%; margin-top: 5px; display: none;"></audio>
@@ -302,6 +268,7 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
     importPresetsBtn: document.getElementById('yt-import-presets-btn'),
 
     langPrefs: document.getElementById('yt-lang-prefs'),
+    fontSize: document.getElementById('yt-font-size'),
     outputLang: document.getElementById('yt-output-lang'),
     customLang: document.getElementById('yt-custom-lang'),
 
@@ -313,6 +280,9 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
     concurrency: document.getElementById('yt-concurrency'),
     asciiOnly: document.getElementById('yt-ascii-only'),
     blocklist: document.getElementById('yt-blocklist'),
+    singleCall: document.getElementById('yt-single-call'),
+    maxTokens: document.getElementById('yt-max-tokens'),
+    styleText: document.getElementById('yt-style-text'),
 
     stylePreset: document.getElementById('yt-style-preset'),
     promptTemplate: document.getElementById('yt-prompt-template'),
@@ -331,8 +301,10 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
     ttsRate: document.getElementById('yt-tts-rate'),
     rateValue: document.getElementById('yt-rate-value'),
     generateTtsBtn: document.getElementById('yt-generate-tts-btn'),
+    stopTtsBtn: document.getElementById('yt-stop-tts-btn'),
     downloadTtsBtn: document.getElementById('yt-download-tts-btn'),
     ttsAudio: document.getElementById('yt-tts-audio'),
+    fontSize: document.getElementById('yt-font-size'),
 
     exportTxtBtn: document.getElementById('yt-export-txt-btn'),
     exportSrtBtn: document.getElementById('yt-export-srt-btn'),
@@ -345,15 +317,15 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
   };
 
   // Default values
-  const DEFAULT_PROMPT = `Restyle this transcript segment to be {{style}}. Output language: {{outlang}}. Keep the meaning intact but improve clarity and readability. If ASCII-only mode is enabled, use only standard ASCII characters (no accents, special punctuation, or Unicode symbols).
+  const DEFAULT_PROMPT = `Restyle this closed-caption sentence fragment in {{style}} style. Output language: {{outlang}}. This input is a partial sentence from on-screen captions. Keep the meaning intact but improve clarity and readability for captions. Do not include timestamps, time ranges, or any numerals that are part of time markers; ignore them entirely. Do not add speaker names or extra content. If ASCII-only mode is enabled, use only standard ASCII characters (no accents, special punctuation, or Unicode symbols).
 
-Context (previous lines):
+Context (previous fragments):
 {{prevLines}}
 
-Current line to restyle:
+Current fragment to restyle:
 {{currentLine}}
 
-Context (next lines):
+Context (next fragments):
 {{nextLines}}`;
 
   const DEFAULT_TTS_SETTINGS = {
@@ -364,6 +336,8 @@ Context (next lines):
     azureRegion: 'eastus',
     rate: 1.0
   };
+
+  const DEFAULT_FONT_SIZE = 13;
 
   // ASCII sanitization - Fixed character list
   const DEFAULT_BAD = [
@@ -546,6 +520,8 @@ Context (next lines):
   // Initialize default values
   elements.promptTemplate.value = DEFAULT_PROMPT;
   Object.assign(lastPrefs, DEFAULT_TTS_SETTINGS);
+  // Apply initial font size from the control value so the UI reflects defaults
+  applyFontSize(parseInt(document.getElementById('yt-font-size')?.value, 10) || DEFAULT_FONT_SIZE);
 
   // Load preferences and apply theme
   async function loadPrefs() {
@@ -556,7 +532,7 @@ Context (next lines):
       });
 
       if (response.success) {
-        const { ytro_prefs, ytro_presets, ytro_debug, ytro_theme, ytro_position } = response.data;
+    const { ytro_prefs, ytro_presets, ytro_debug, ytro_theme, ytro_position } = response.data;
 
         // Apply debug setting
         if (ytro_debug !== undefined) {
@@ -580,7 +556,8 @@ Context (next lines):
         // Load preferences
         if (ytro_prefs) {
           setIf(elements.videoId, ytro_prefs.videoId);
-          setIf(elements.langPrefs, ytro_prefs.langPrefs);
+        setIf(elements.langPrefs, ytro_prefs.langPrefs);
+        setIf(elements.fontSize, ytro_prefs.fontSize);
           setIf(elements.outputLang, ytro_prefs.outputLang);
           setIf(elements.customLang, ytro_prefs.customLang);
           setIf(elements.provider, ytro_prefs.provider);
@@ -592,6 +569,9 @@ Context (next lines):
           setIf(elements.promptTemplate, ytro_prefs.promptTemplate);
           setIf(elements.asciiOnly, ytro_prefs.asciiOnly, 'checked');
           setIf(elements.blocklist, ytro_prefs.blocklist);
+          setIf(elements.singleCall, ytro_prefs.singleCall, 'checked');
+          setIf(elements.maxTokens, ytro_prefs.maxTokens);
+          setIf(elements.styleText, ytro_prefs.styleText);
 
           // TTS settings
           setIf(elements.ttsEnabled, ytro_prefs.ttsEnabled, 'checked');
@@ -602,7 +582,8 @@ Context (next lines):
           setIf(elements.ttsRate, ytro_prefs.ttsRate);
 
           Object.assign(lastPrefs, ytro_prefs);
-          syncProviderUI();
+        syncProviderUI();
+        applyFontSize(ytro_prefs.fontSize);
           syncTtsUI();
         }
 
@@ -627,6 +608,8 @@ Context (next lines):
     }
   }
 
+  
+
   // Save preferences
   async function savePrefs() {
     const prefs = {
@@ -634,16 +617,20 @@ Context (next lines):
       langPrefs: elements.langPrefs.value,
       outputLang: elements.outputLang.value,
       customLang: elements.customLang.value,
-      provider: elements.provider.value,
-      baseUrl: elements.baseUrl.value,
-      model: elements.model.value,
-      anthropicVersion:
-        elements.provider.value === 'anthropic' ? elements.anthropicVersion.value.trim() : '',
-      concurrency: parseInt(elements.concurrency.value) || 3,
-      stylePreset: elements.stylePreset.value,
+    provider: elements.provider.value,
+    baseUrl: elements.baseUrl.value,
+    model: elements.model.value,
+    anthropicVersion:
+      elements.provider.value === 'anthropic' ? elements.anthropicVersion.value.trim() : '',
+    concurrency: parseInt(elements.concurrency.value) || 3,
+    stylePreset: elements.stylePreset.value,
+    fontSize: parseInt(elements.fontSize.value, 10) || DEFAULT_FONT_SIZE,
       promptTemplate: elements.promptTemplate.value,
       asciiOnly: elements.asciiOnly.checked,
       blocklist: elements.blocklist.value,
+      singleCall: elements.singleCall.checked,
+      maxTokens: parseInt(elements.maxTokens?.value, 10) || 1000,
+      styleText: elements.styleText?.value || '',
 
       // TTS settings
       ttsEnabled: elements.ttsEnabled.checked,
@@ -679,6 +666,14 @@ Context (next lines):
     }).catch(logError);
   }
 
+  function applyFontSize(pxValue) {
+    const size = parseInt(pxValue, 10);
+    const resolved = Number.isFinite(size) && size > 0 ? size : DEFAULT_FONT_SIZE;
+    overlay.style.setProperty('--yt-font-size', `${resolved}px`);
+    // Also scale the on-video subtitle overlay
+    overlay.style.setProperty('--ts-subtitle-font-size', `${Math.round(resolved * 1.85)}px`);
+  }
+
   // Preset management
   function rebuildPresetOptions() {
     // This would rebuild preset dropdown if we had one
@@ -705,38 +700,13 @@ Context (next lines):
       ttsVoice: elements.ttsVoice.value,
       ttsFormat: elements.ttsFormat.value,
       azureRegion: elements.azureRegion.value,
-      ttsRate: parseFloat(elements.ttsRate.value) || 1.0
+      ttsRate: parseFloat(elements.ttsRate.value) || 1.0,
+      singleCall: elements.singleCall.checked,
+      maxTokens: parseInt(elements.maxTokens?.value, 10) || 1000,
+      styleText: elements.styleText?.value || ''
     };
   }
 
-  function loadPreset(preset) {
-    if (!preset) return;
-
-    setIf(elements.provider, preset.provider);
-    setIf(elements.baseUrl, preset.baseUrl);
-    setIf(elements.model, preset.model);
-    setIf(elements.anthropicVersion, preset.anthropicVersion);
-    setIf(elements.concurrency, preset.concurrency);
-    setIf(elements.stylePreset, preset.stylePreset);
-    setIf(elements.promptTemplate, preset.promptTemplate);
-    setIf(elements.asciiOnly, preset.asciiOnly, 'checked');
-    setIf(elements.blocklist, preset.blocklist);
-    setIf(elements.langPrefs, preset.langPrefs);
-    setIf(elements.outputLang, preset.outputLang);
-    setIf(elements.customLang, preset.customLang);
-    setIf(elements.ttsEnabled, preset.ttsEnabled, 'checked');
-    setIf(elements.ttsProvider, preset.ttsProvider);
-    setIf(elements.ttsVoice, preset.ttsVoice);
-    setIf(elements.ttsFormat, preset.ttsFormat);
-    setIf(elements.azureRegion, preset.azureRegion);
-    setIf(elements.ttsRate, preset.ttsRate);
-
-    syncProviderUI();
-    syncTtsUI();
-    savePrefs();
-  }
-
-  // Utility functions
   function setStatus(msg, isError = false) {
     elements.status.textContent = msg;
     elements.status.className = `yt-status ${isError ? 'yt-error' : ''}`;
@@ -746,17 +716,6 @@ Context (next lines):
   function setError(msg) {
     setStatus(msg, true);
     logError(msg);
-  }
-
-  function parseTime(timeStr) {
-    if (!timeStr) return 0;
-    const parts = timeStr.split(':').map(p => parseFloat(p) || 0);
-    if (parts.length === 3) {
-      return parts[0] * 3600 + parts[1] * 60 + parts[2];
-    } else if (parts.length === 2) {
-      return parts[0] * 60 + parts[1];
-    }
-    return parts[0] || 0;
   }
 
   function formatTime(seconds) {
@@ -771,134 +730,9 @@ Context (next lines):
     }
   }
 
-  function mergeNearbySegments(segments, threshold = 0.25) {
-    if (!segments || segments.length <= 1) return segments;
 
-    const merged = [segments[0]];
-
-    for (let i = 1; i < segments.length; i++) {
-      const prev = merged[merged.length - 1];
-      const curr = segments[i];
-
-      if (curr.start - prev.end <= threshold) {
-        // Merge segments
-        prev.end = curr.end;
-        prev.text = `${prev.text} ${curr.text}`.replace(/\s+/g, ' ').trim();
-      } else {
-        merged.push(curr);
-      }
-    }
-
-    return merged;
-  }
 
   // Parsing functions
-  function parseVTT(vtt) {
-    const segments = [];
-    const lines = vtt.split('\n');
-    let i = 0;
-
-    while (i < lines.length) {
-      const line = lines[i].trim();
-
-      // Skip header and empty lines
-      if (!line || line === 'WEBVTT' || line.startsWith('NOTE') || line.startsWith('STYLE')) {
-        i++;
-        continue;
-      }
-
-      // Check if this is a timestamp line
-      if (line.includes(' --> ')) {
-        const [startStr, endStr] = line.split(' --> ').map(s => s.trim());
-        const start = parseTime(startStr);
-        const end = parseTime(endStr);
-
-        // Collect text lines until next timestamp or end
-        const textLines = [];
-        i++;
-        while (i < lines.length && !lines[i].includes(' --> ') && lines[i].trim()) {
-          // Remove VTT tags like <c.colorname>text</c>
-          const cleanText = lines[i].replace(/<[^>]*>/g, '').trim();
-          if (cleanText) textLines.push(cleanText);
-          i++;
-        }
-
-        if (textLines.length > 0) {
-          segments.push({
-            start,
-            end,
-            text: textLines.join(' ').replace(/\s+/g, ' ').trim()
-          });
-        }
-      } else {
-        i++;
-      }
-    }
-
-    return mergeNearbySegments(segments);
-  }
-
-  function parseJSON3(jsonText) {
-    try {
-      const sanitized = jsonText
-        .trim()
-        .replace(/^\)]\}'?/, '')
-        .trim();
-      const data = JSON.parse(sanitized);
-      const events = Array.isArray(data.events) ? data.events : [];
-      const segments = [];
-
-      events.forEach(event => {
-        const start = (event.tStartMs ?? event.tstartms ?? 0) / 1000;
-        const dur = (event.dDurationMs ?? event.dDuration ?? 0) / 1000;
-        const end = start + (Number.isFinite(dur) && dur > 0 ? dur : 0);
-
-        let textParts = '';
-        if (Array.isArray(event.segs)) {
-          textParts = event.segs.map(seg => seg.utf8 || '').join('');
-        } else if (event.segs?.utf8) {
-          textParts = event.segs.utf8;
-        } else if (typeof event.transcript === 'string') {
-          textParts = event.transcript;
-        }
-
-        const clean = textParts.replace(/\s+/g, ' ').trim();
-        if (clean) {
-          segments.push({
-            start,
-            end: end || start,
-            text: clean
-          });
-        }
-      });
-
-      return mergeNearbySegments(segments);
-    } catch (error) {
-      logError('Failed to parse JSON3 captions', error);
-      return [];
-    }
-  }
-
-  function parseSRV3(xml) {
-    const segments = [];
-    const parser = new DOMParser();
-    const doc = parser.parseFromString(xml, 'text/xml');
-    const texts = doc.querySelectorAll('text');
-
-    texts.forEach(textEl => {
-      const start = parseFloat(textEl.getAttribute('start')) || 0;
-      const dur = parseFloat(textEl.getAttribute('dur')) || 0;
-      const end = start + dur;
-      const text = textEl.textContent?.replace(/\s+/g, ' ').trim() || '';
-
-      if (text) {
-        segments.push({ start, end, text });
-      }
-    });
-
-    return mergeNearbySegments(segments);
-  }
-
   function ensureSubtitleOverlay() {
     if (!subtitleOverlayEl) {
       subtitleOverlayEl = document.createElement('div');
@@ -1022,18 +856,6 @@ Context (next lines):
     }
   }
 
-  function parsePlainText(text) {
-    // Simple fallback for plain text
-    return [
-      {
-        start: 0,
-        end: 0,
-        text: text.trim()
-      }
-    ];
-  }
-
-  // Rendering functions
   function renderList(segments = transcriptData, searchTerm = '') {
     if (!Array.isArray(segments)) return;
 
@@ -1084,20 +906,30 @@ Context (next lines):
 
     // Get context
     const contextRadius = 2;
+    const formatPrevContextLine = seg => {
+      // Prefer the model's previous outputs when available to maintain coherence
+      return `${seg.restyled || seg.text || ''}`.trim();
+    };
+    const formatNextContextLine = seg => {
+      // Use only original upcoming text; omit any timestamps
+      return `${seg.text || ''}`.trim();
+    };
+
     const prevLines = segments
       .slice(Math.max(0, index - contextRadius), index)
-      .map(s => s.text)
-      .join('\n');
+      .map(formatPrevContextLine)
+      .join('\n') || '(none)';
     const nextLines = segments
       .slice(index + 1, Math.min(segments.length, index + contextRadius + 1))
-      .map(s => s.text)
-      .join('\n');
+      .map(formatNextContextLine)
+      .join('\n') || '(none)';
+    const currentLine = formatNextContextLine(segment);
 
     // Replace placeholders
     template = template
       .replaceAll('{{style}}', style)
       .replaceAll('{{outlang}}', outLang)
-      .replaceAll('{{currentLine}}', segment.text)
+      .replaceAll('{{currentLine}}', currentLine)
       .replaceAll('{{prevLines}}', prevLines)
       .replaceAll('{{nextLines}}', nextLines);
 
@@ -1105,6 +937,48 @@ Context (next lines):
     if (elements.asciiOnly.checked) {
       template +=
         '\n\nIMPORTANT: Use only standard ASCII characters in your response. Avoid accented letters, special punctuation, or Unicode symbols.';
+      if (elements.blocklist.value.trim()) {
+        template += ` Also avoid these specific characters: ${elements.blocklist.value.trim()}`;
+      }
+    }
+
+    return template;
+  }
+
+  // Build a single-call prompt that includes all segments with time data and asks for JSON output
+  function buildGlobalPrompt(segments) {
+    const presetStyle = elements.stylePreset.value.replace('-', ' ');
+    const style = elements.stylePreset.value === 'custom'
+      ? (elements.styleText?.value?.trim() || 'custom style provided by the user')
+      : presetStyle;
+    const outLang =
+      elements.outputLang.value === 'custom'
+        ? elements.customLang.value || 'English'
+        : elements.outputLang.value;
+
+    const minimal = segments.map(seg => ({
+      start: Number(seg.start) || 0,
+      end: Number(seg.end) || (Number(seg.start) || 0) + (Number(seg.duration) || 0),
+      text: String(seg.text || '')
+    }));
+
+    let template = `You are rewriting a full closed-caption transcript in a coherent way.
+Style: ${style}
+Output language: ${outLang}
+
+Constraints:
+- Preserve the number of segments and each segment's start and end timestamps unchanged.
+- Rewrite only the text content to be coherent and fluent while keeping similar word density per segment so playback pacing remains natural.
+- Do not invent content, speaker names, or change timing.
+- Return ONLY strict JSON with this exact shape and property names:
+{ "segments": [ { "start": number, "end": number, "text": string }, ... ] }
+No markdown fences, no commentary.
+
+Input segments (JSON):\n` + JSON.stringify({ segments: minimal });
+
+    if (elements.asciiOnly.checked) {
+      template +=
+        `\n\nIMPORTANT: Use only standard ASCII characters in your response. Avoid accented letters, special punctuation, or Unicode symbols.`;
       if (elements.blocklist.value.trim()) {
         template += ` Also avoid these specific characters: ${elements.blocklist.value.trim()}`;
       }
@@ -1152,112 +1026,72 @@ Context (next lines):
       .map(l => l.trim().toLowerCase())
       .filter(Boolean);
 
-    const tracks = [];
-    const seen = new Map();
-
-    const normalizeTrack = track => {
-      const result = { ...track };
-      if (!result.lang && result.baseUrl) {
-        try {
-          const url = new URL(result.baseUrl);
-          result.lang = url.searchParams.get('lang') || url.searchParams.get('lang_code') || '';
-        } catch (error) {
-          logError('Failed to parse caption URL for language', error);
-        }
-      }
-      result.lang = result.lang || '';
-      result.name = result.name || '';
-      result.kind = result.kind || '';
-      return result;
-    };
-
-    const pushTrack = track => {
-      const normalized = normalizeTrack(track);
-      const key = `${normalized.lang}|${normalized.name}|${normalized.kind}`;
-      if (seen.has(key)) {
-        const existing = seen.get(key);
-        if (!existing.baseUrl && normalized.baseUrl) {
-          existing.baseUrl = normalized.baseUrl;
-        }
-        return;
-      }
-      seen.set(key, normalized);
-      tracks.push(normalized);
-    };
-
-    log(`Starting track listing for videoId: ${videoId}`);
     try {
       setStatus('Listing tracks...');
       const response = await sendMessage('LIST_TRACKS', { videoId });
-      log(`LIST_TRACKS response received:`, response);
-
-      if (response.success) {
-        const parser = new DOMParser();
-        const doc = parser.parseFromString(response.data, 'text/xml');
-        const timedtextTracks = doc.querySelectorAll('track');
-        timedtextTracks.forEach(track => {
-          const trackInfo = {
-            lang: track.getAttribute('lang_code') || '',
-            name: track.getAttribute('name') || '',
-            kind: track.getAttribute('kind') || '',
-            baseUrl: '',
-            source: 'timedtext'
-          };
-          log(`Parsed track from timedtext:`, trackInfo);
-          pushTrack(trackInfo);
-        });
-        log(`Timedtext returned ${timedtextTracks.length} tracks`);
+      if (!response || !response.success) {
+        throw new Error(response?.error || 'Local helper unavailable');
       }
-    } catch (error) {
-      logError('Timedtext track listing failed', error);
-    }
 
-    try {
-      const playerTracks = getTracksFromPlayer(videoId);
-      playerTracks.forEach(track => {
-        log(`Parsed track from player:`, track);
-        pushTrack(track);
+      const payload = response.data || {};
+      const tracks = Array.isArray(payload.tracks) ? payload.tracks : [];
+      if (!tracks.length) {
+        elements.trackSelect.innerHTML = '<option value="">No tracks found</option>';
+        setError('No caption tracks available from the local helper');
+        return;
+      }
+
+      const normalized = tracks.map((track, index) => {
+        const lang = (track.lang || '').toLowerCase();
+        const displayName = track.name || track.language || track.lang || `Track ${index + 1}`;
+        return {
+          lang,
+          name: displayName,
+          language: track.language || displayName,
+          isGenerated: Boolean(track.isGenerated),
+          isTranslatable: Boolean(track.isTranslatable),
+          translationLanguages: track.translationLanguages || [],
+          source: track.source || 'local-helper'
+        };
       });
-      log(`Player response provided ${playerTracks.length} tracks`);
+
+      normalized.sort((a, b) => {
+        const aIndex = langPrefs.indexOf(a.lang);
+        const bIndex = langPrefs.indexOf(b.lang);
+        if (aIndex !== -1 && bIndex !== -1) return aIndex - bIndex;
+        if (aIndex !== -1) return -1;
+        if (bIndex !== -1) return 1;
+        return a.lang.localeCompare(b.lang);
+      });
+
+      elements.trackSelect.innerHTML = '<option value="">Select a track...</option>';
+      normalized.forEach(track => {
+        const option = document.createElement('option');
+        option.value = JSON.stringify(track);
+        const parts = [];
+        if (track.language) parts.push(track.language);
+        if (track.lang && track.lang !== track.language?.toLowerCase()) {
+          parts.push(`(${track.lang})`);
+        }
+        const flags = [];
+        if (track.isGenerated) flags.push('auto');
+        let label = parts.filter(Boolean).join(' ');
+        if (!label) label = 'Unknown language';
+        if (flags.length) {
+          label += ` [${flags.join(', ')}]`;
+        }
+        option.textContent = label;
+        elements.trackSelect.appendChild(option);
+      });
+
+      setStatus(`Found ${normalized.length} tracks in ${dur(start)}`);
+      log(`Listed ${normalized.length} tracks via local helper`, normalized);
     } catch (error) {
-      logError('Failed to read tracks from player', error);
-    }
-
-    if (!tracks.length) {
-      setError('No caption tracks available for this video');
+      logError('Failed to list tracks:', error);
       elements.trackSelect.innerHTML = '<option value="">No tracks found</option>';
-      return;
+      setError(`Failed to list tracks: ${error.message}`);
     }
-
-    tracks.sort((a, b) => {
-      const aLang = a.lang.toLowerCase();
-      const bLang = b.lang.toLowerCase();
-      const aIndex = langPrefs.indexOf(aLang);
-      const bIndex = langPrefs.indexOf(bLang);
-
-      if (aIndex !== -1 && bIndex !== -1) return aIndex - bIndex;
-      if (aIndex !== -1) return -1;
-      if (bIndex !== -1) return 1;
-      return aLang.localeCompare(bLang);
-    });
-
-    elements.trackSelect.innerHTML = '<option value="">Select a track...</option>';
-    tracks.forEach(track => {
-      let label = track.lang || 'Unknown language';
-      if (track.name) label += ` • ${track.name}`;
-      if (track.kind) label += ` (${track.kind})`;
-      if (track.source === 'player') label += ' • in-page';
-
-      const option = document.createElement('option');
-      option.value = JSON.stringify(track);
-      option.textContent = label;
-      elements.trackSelect.appendChild(option);
-    });
-
-    setStatus(`Found ${tracks.length} tracks in ${dur(start)}`);
-    log(`Listed ${tracks.length} tracks (combined)`);
   }
-
   // Transcript fetching
   async function fetchTranscript() {
     const start = Date.now();
@@ -1268,60 +1102,71 @@ Context (next lines):
     if (elements.trackSelect.value) {
       try {
         trackData = JSON.parse(elements.trackSelect.value);
-        log(`Parsed track data:`, trackData);
+        log('Parsed track data:', trackData);
       } catch (error) {
         logError('Invalid track selection:', error);
       }
     } else {
-      log(`No track selected, using defaults`);
+      log('No track selected, using defaults');
     }
 
+    const lang = trackData.lang || 'en';
     const requestData = {
       videoId,
-      lang: trackData.lang || 'en',
-      name: trackData.name || '',
-      baseUrl: trackData.baseUrl || '',
-      kind: trackData.kind || ''
+      lang,
+      preferAsr: Boolean(trackData.isGenerated)
     };
 
-    log(`Sending FETCH_TRANSCRIPT request:`, requestData);
-    log(`Full track data object:`, trackData);
-    log(`Track source:`, trackData.source || 'unknown');
+    log('Sending FETCH_TRANSCRIPT request:', requestData);
 
     try {
       setStatus('Fetching transcript...');
       const response = await sendMessage('FETCH_TRANSCRIPT', requestData);
-
-      if (!response.success) {
-        throw new Error(response.error);
+      if (!response || !response.success) {
+        throw new Error(response?.error || 'Local helper unavailable');
       }
 
-      const { text, format } = response.data;
-      log(`Received transcript: format=${format}, length=${text.length}`);
-
-      // Parse based on format
-      let segments = [];
-      if (format === 'vtt') {
-        segments = parseVTT(text);
-      } else if (format === 'srv3') {
-        segments = parseSRV3(text);
-      } else if (format === 'json3') {
-        segments = parseJSON3(text);
-      } else {
-        segments = parsePlainText(text);
+      const { format, segments } = response.data || {};
+      if (format !== 'segments') {
+        throw new Error(`Unsupported transcript format: ${format || 'unknown'}`);
+      }
+      if (!Array.isArray(segments) || !segments.length) {
+        throw new Error('Local helper returned an empty transcript');
       }
 
-      if (!segments.length && text.trim()) {
-        segments = parsePlainText(text);
+      const normalized = segments
+        .map(segment => {
+          const startTime = Number(segment.start) || 0;
+          const endTimeRaw = segment.end !== undefined ? Number(segment.end) : NaN;
+          let duration = Number(segment.duration);
+          let endTime = endTimeRaw;
+          if (!Number.isFinite(duration) || duration < 0) {
+            duration = Number.isFinite(endTimeRaw) ? endTimeRaw - startTime : 0;
+          }
+          if (!Number.isFinite(endTime)) {
+            endTime = startTime + Math.max(0, duration);
+          }
+
+          return {
+            start: Math.max(0, startTime),
+            end: Math.max(startTime, endTime),
+            duration: Math.max(0, duration),
+            text: (segment.text || '').trim()
+          };
+        })
+        .filter(segment => segment.text);
+
+      if (!normalized.length) {
+        throw new Error('Parsed transcript contained no usable segments');
       }
 
-      transcriptData = segments;
+      transcriptData = normalized;
       renderList();
       resetSubtitleState();
       ensureVideoListeners();
 
-      setStatus(`Transcript loaded: ${segments.length} segments in ${dur(start)}`);
-      log(`Parsed ${segments.length} segments`);
+      setStatus(`Transcript loaded: ${transcriptData.length} segments in ${dur(start)}`);
+      log(`Parsed ${transcriptData.length} segments`);
       return true;
     } catch (error) {
       setError(`Failed to fetch transcript: ${error.message}`);
@@ -1332,6 +1177,12 @@ Context (next lines):
   // LLM restyling
 
   async function restyleAll() {
+    // Validate inputs before proceeding
+    if (!validateAllInputs()) {
+      setError('Please fix the validation errors before restyling');
+      return;
+    }
+
     if (!transcriptData.length) {
       if (!elements.trackSelect.value) {
         setError('Select a caption track and fetch the transcript first');
@@ -1343,6 +1194,96 @@ Context (next lines):
         setError('No transcript data loaded');
         return;
       }
+    }
+
+    // Single-call mode: one LLM request for the entire transcript
+    if (elements.singleCall && elements.singleCall.checked) {
+      try {
+        setStatus('Starting single-call restyle...');
+
+        const prompt = buildGlobalPrompt(transcriptData);
+        aborter = new AbortController();
+        activeBatchId = `restyle-one-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+        const response = await sendMessage('LLM_CALL', {
+          provider: elements.provider.value,
+          baseUrl: elements.baseUrl.value,
+          apiKey: elements.apiKey.value,
+          model: elements.model.value,
+          systemPrompt: '',
+          userPrompt: prompt,
+          asciiOnly: elements.asciiOnly.checked,
+          batchId: activeBatchId,
+          requestId: `${activeBatchId}:0`,
+          anthropicVersion: elements.anthropicVersion.value.trim(),
+          maxTokens: parseInt(elements.maxTokens?.value, 10) || 1000
+        });
+
+        if (!response?.success) {
+          throw new Error(response?.error || 'LLM call failed');
+        }
+
+        let payloadText = response.data || '';
+        // Strip markdown fences if present
+        payloadText = String(payloadText).trim();
+        const fenceMatch = payloadText.match(/```[a-zA-Z]*\n([\s\S]*?)```/);
+        if (fenceMatch) {
+          payloadText = fenceMatch[1].trim();
+        }
+        // Attempt to find first JSON object if extra text present
+        const firstBrace = payloadText.indexOf('{');
+        if (firstBrace > 0) {
+          payloadText = payloadText.slice(firstBrace);
+        }
+
+        let parsed;
+        try {
+          parsed = JSON.parse(payloadText);
+        } catch (e) {
+          throw new Error('Model did not return valid JSON');
+        }
+
+        const outSegments = Array.isArray(parsed?.segments) ? parsed.segments : [];
+        if (!outSegments.length) {
+          throw new Error('No segments found in model output');
+        }
+
+        // Map back by index when counts match; otherwise try by time
+        if (outSegments.length === transcriptData.length) {
+          outSegments.forEach((seg, i) => {
+            const text = String(seg.text || '');
+            transcriptData[i].restyled = elements.asciiOnly.checked
+              ? sanitizeAscii(text, elements.blocklist.value)
+              : text;
+          });
+        } else {
+          // Fallback: build a map by start-end seconds
+          const key = s => `${Number(s.start)||0}-${Number(s.end)||0}`;
+          const map = new Map(outSegments.map(s => [key(s), String(s.text || '')]));
+          transcriptData.forEach((s, i) => {
+            const t = map.get(key(s));
+            if (typeof t === 'string') {
+              transcriptData[i].restyled = elements.asciiOnly.checked
+                ? sanitizeAscii(t, elements.blocklist.value)
+                : t;
+            }
+          });
+        }
+
+        renderList();
+        updateSubtitleText(transcriptData[activeSegmentIndex] || null);
+        setStatus(`Single-call restyle complete: ${transcriptData.filter(s=>s.restyled).length}/${transcriptData.length} segments updated`);
+      } catch (error) {
+        logError('Single-call restyle failed:', error);
+        setError(`Restyle failed: ${error.message}`);
+      } finally {
+        elements.restyleBtn.disabled = false;
+        elements.stopBtn.disabled = true;
+        elements.progress.textContent = '';
+        aborter = null;
+        activeBatchId = null;
+      }
+      return;
     }
 
     const concurrencyValue = parseInt(elements.concurrency.value, 10) || 3;
@@ -1546,6 +1487,11 @@ Context (next lines):
     if (container) {
       container.style.display = isAnthropic ? 'block' : 'none';
     }
+    // Show custom style input when preset is 'custom'
+    const styleRow = document.getElementById('yt-style-text-row');
+    if (styleRow) {
+      styleRow.style.display = elements.stylePreset.value === 'custom' ? 'block' : 'none';
+    }
   }
 
   // TTS functions
@@ -1566,6 +1512,104 @@ Context (next lines):
     if (provider === 'browser') {
       listBrowserVoices();
     }
+  }
+
+  function showStopButton(show) {
+    if (!elements.stopTtsBtn) return;
+    elements.stopTtsBtn.style.display = show ? 'inline-block' : 'none';
+  }
+
+  function isAudioPlaying() {
+    try {
+      const a = elements.ttsAudio;
+      return Boolean(a && !a.paused && !a.ended && a.currentTime > 0 && a.readyState > 2);
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function updateStopButtonVisibility() {
+    showStopButton(browserTtsActive || isAudioPlaying());
+  }
+
+  // Input validation functions
+  function validateApiKey(key) {
+    if (!key || !key.trim()) return 'API key is required';
+    if (key.length < 8) return 'API key seems too short';
+    // Basic validation - no spaces, contains typical API key characters
+    if (/\s/.test(key)) return 'API key should not contain spaces';
+    return null;
+  }
+
+  function validateUrl(url) {
+    if (!url || !url.trim()) return null; // Empty URLs are OK for some providers
+    try {
+      const parsed = new URL(url);
+      if (!parsed.protocol.startsWith('http')) return 'URL must use HTTP or HTTPS protocol';
+      return null;
+    } catch {
+      return 'Invalid URL format';
+    }
+  }
+
+  function validateModel(model) {
+    if (!model || !model.trim()) return 'Model name is required';
+    if (model.length < 2) return 'Model name too short';
+    return null;
+  }
+
+  function validateInput(field, validator) {
+    const value = field.value.trim();
+    const error = validator(value);
+
+    // Remove existing error styling
+    field.classList.remove('yt-input-error');
+    let errorEl = field.parentNode.querySelector('.yt-field-error');
+    if (errorEl) errorEl.remove();
+
+    if (error) {
+      field.classList.add('yt-input-error');
+      const errorDiv = document.createElement('div');
+      errorDiv.className = 'yt-field-error';
+      errorDiv.textContent = error;
+      errorDiv.style.color = '#ff6b6b';
+      errorDiv.style.fontSize = '11px';
+      errorDiv.style.marginTop = '2px';
+      field.parentNode.appendChild(errorDiv);
+      return false;
+    }
+
+    return true;
+  }
+
+  function validateAllInputs() {
+    let isValid = true;
+
+    // Validate API key
+    if (!validateInput(elements.apiKey, validateApiKey)) isValid = false;
+
+    // Validate base URL
+    if (!validateInput(elements.baseUrl, validateUrl)) isValid = false;
+
+    // Validate model
+    if (!validateInput(elements.model, validateModel)) isValid = false;
+
+    return isValid;
+  }
+
+  function handleFontSizeChange() {
+    const size = parseInt(elements.fontSize.value, 10);
+    if (!Number.isFinite(size) || size < 10 || size > 24) {
+      return;
+    }
+    applyFontSize(size);
+    savePrefs();
+  }
+
+  function setTtsUiState(isRunning) {
+    if (!elements.generateTtsBtn) return;
+    elements.generateTtsBtn.disabled = Boolean(isRunning);
+    updateStopButtonVisibility();
   }
 
   function listBrowserVoices() {
@@ -1646,19 +1690,32 @@ Context (next lines):
       return;
     }
 
+    // Validate inputs for TTS providers that need API keys
+    const provider = elements.ttsProvider.value;
+    if (provider === 'openai' || provider === 'openai-compatible' || provider === 'azure') {
+      if (!validateAllInputs()) {
+        setError('Please fix the validation errors before generating TTS');
+        return;
+      }
+    }
+
     const text = gatherTranscriptText();
     if (!text) {
       setError('No transcript text available');
       return;
     }
-
-    const provider = elements.ttsProvider.value;
     const format = (elements.ttsFormat.value || 'mp3').toLowerCase();
 
     try {
       setStatus('Generating TTS audio...');
 
+      // Setup request identifiers for abort support
+      activeTtsBatchId = `tts-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      activeTtsRequestId = `${activeTtsBatchId}:0`;
+      setTtsUiState(true);
+
       if (provider === 'browser') {
+        browserTtsActive = true;
         generateBrowserTTS(text);
         return;
       }
@@ -1668,7 +1725,9 @@ Context (next lines):
         format,
         text: text.substring(0, 4000),
         baseUrl: elements.baseUrl.value,
-        apiKey: elements.apiKey.value
+        apiKey: elements.apiKey.value,
+        batchId: activeTtsBatchId,
+        requestId: activeTtsRequestId
       };
 
       if (provider === 'azure') {
@@ -1714,10 +1773,32 @@ Context (next lines):
         a.click();
       };
 
+      // Clear any previous audio cleanup timeout
+      if (elements.ttsAudio._cleanupTimeout) {
+        clearTimeout(elements.ttsAudio._cleanupTimeout);
+      }
+
+      // Auto-cleanup audio after 5 minutes to prevent memory leaks
+      elements.ttsAudio._cleanupTimeout = setTimeout(() => {
+        if (elements.ttsAudio && elements.ttsAudio.src) {
+          URL.revokeObjectURL(elements.ttsAudio.src);
+          elements.ttsAudio.src = '';
+          elements.ttsAudio.style.display = 'none';
+          elements.downloadTtsBtn.style.display = 'none';
+          updateStopButtonVisibility();
+        }
+      }, 5 * 60 * 1000);
+
       setStatus('TTS audio generated successfully');
+      updateStopButtonVisibility();
     } catch (error) {
       logError('TTS generation failed:', error);
       setError(`TTS failed: ${error.message}`);
+    } finally {
+      setTtsUiState(false);
+      activeTtsRequestId = null;
+      activeTtsBatchId = null;
+      browserTtsActive = false;
     }
   }
 
@@ -1743,11 +1824,77 @@ Context (next lines):
 
     utterance.rate = parseFloat(elements.ttsRate.value) || 1.0;
 
-    utterance.onstart = () => setStatus('Playing browser TTS...');
-    utterance.onend = () => setStatus('Browser TTS completed');
-    utterance.onerror = e => setError(`Browser TTS error: ${e.error}`);
+    setTtsUiState(true);
+    utterance.onstart = () => {
+      setStatus('Playing browser TTS...');
+      browserTtsActive = true;
+      updateStopButtonVisibility();
+    };
+    utterance.onend = () => {
+      setStatus('Browser TTS completed');
+      setTtsUiState(false);
+      browserTtsActive = false;
+      activeTtsRequestId = null;
+      activeTtsBatchId = null;
+      updateStopButtonVisibility();
+    };
+    utterance.onerror = e => {
+      setError(`Browser TTS error: ${e.error}`);
+      setTtsUiState(false);
+      browserTtsActive = false;
+      activeTtsRequestId = null;
+      activeTtsBatchId = null;
+      updateStopButtonVisibility();
+    };
 
     speechSynthesis.speak(utterance);
+  }
+
+  async function stopTTS() {
+    try {
+      // Stop browser speech if active
+      if (elements.ttsProvider.value === 'browser' || browserTtsActive) {
+        if (window.speechSynthesis) {
+          speechSynthesis.cancel();
+        }
+        browserTtsActive = false;
+      }
+
+      // Pause audio playback if playing
+      try {
+        if (elements.ttsAudio && !elements.ttsAudio.paused) {
+          elements.ttsAudio.pause();
+          elements.ttsAudio.currentTime = 0;
+        }
+      } catch (_) {
+        /* ignore */
+      }
+
+      // Abort background request if present
+      if (activeTtsRequestId || activeTtsBatchId) {
+        await sendMessage('ABORT_REQUESTS', {
+          requestIds: activeTtsRequestId ? [activeTtsRequestId] : [],
+          batchId: activeTtsBatchId || undefined
+        });
+      }
+
+      setStatus('TTS stopped');
+    } catch (error) {
+      logError('Failed to stop TTS:', error);
+    } finally {
+      setTtsUiState(false);
+      activeTtsRequestId = null;
+      activeTtsBatchId = null;
+      browserTtsActive = false;
+      updateStopButtonVisibility();
+    }
+  }
+
+  // Keep Stop TTS visible while audio is playing
+  if (elements.ttsAudio) {
+    ['play', 'playing', 'pause', 'ended', 'emptied', 'abort', 'stalled', 'suspend'].forEach(evt => {
+      elements.ttsAudio.addEventListener(evt, updateStopButtonVisibility);
+    });
   }
 
   // Export functions
@@ -1777,7 +1924,7 @@ Context (next lines):
       .join('\n');
 
     downloadText(content, 'transcript.txt');
-    setStatus('TXT export completed');
+    setStatus('TXT export completed (includes restyled content)');
   }
 
   function exportSRT() {
@@ -1905,6 +2052,12 @@ ${text}
     overlay.remove();
   });
 
+  // Font size live updates
+  if (elements.fontSize) {
+    elements.fontSize.addEventListener('input', handleFontSizeChange);
+    elements.fontSize.addEventListener('change', handleFontSizeChange);
+  }
+
   elements.detectBtn.addEventListener('click', detectVideoId);
   elements.listTracksBtn.addEventListener('click', listTracks);
   elements.fetchTranscriptBtn.addEventListener('click', fetchTranscript);
@@ -1983,10 +2136,14 @@ ${text}
   elements.restyleBtn.addEventListener('click', restyleAll);
   elements.stopBtn.addEventListener('click', stopRestyle);
   elements.provider.addEventListener('change', syncProviderUI);
+  elements.stylePreset.addEventListener('change', syncProviderUI);
 
   elements.ttsProvider.addEventListener('change', syncTtsUI);
   elements.azureVoicesBtn.addEventListener('click', listAzureVoices);
   elements.generateTtsBtn.addEventListener('click', generateTTS);
+  if (elements.stopTtsBtn) {
+    elements.stopTtsBtn.addEventListener('click', stopTTS);
+  }
 
   elements.ttsRate.addEventListener('input', () => {
     elements.rateValue.textContent = elements.ttsRate.value;
@@ -2005,6 +2162,7 @@ ${text}
   [
     elements.videoId,
     elements.langPrefs,
+    elements.fontSize,
     elements.outputLang,
     elements.customLang,
     elements.provider,
@@ -2016,6 +2174,8 @@ ${text}
     elements.promptTemplate,
     elements.asciiOnly,
     elements.blocklist,
+    elements.maxTokens,
+    elements.styleText,
     elements.ttsEnabled,
     elements.ttsProvider,
     elements.ttsVoice,
@@ -2077,18 +2237,38 @@ ${text}
     }).catch(logError);
   }
 
-  // Navigation watcher to reset state
+  // Navigation watcher to reset state and cleanup resources
   let lastUrl = location.href;
   function checkNavigation() {
     if (location.href !== lastUrl) {
       lastUrl = location.href;
+
+      // Cleanup resources before resetting
+      if (elements.ttsAudio && elements.ttsAudio._cleanupTimeout) {
+        clearTimeout(elements.ttsAudio._cleanupTimeout);
+      }
+      if (lastTtsUrl) {
+        URL.revokeObjectURL(lastTtsUrl);
+        lastTtsUrl = '';
+      }
+      if (elements.ttsAudio && elements.ttsAudio.src) {
+        elements.ttsAudio.src = '';
+        elements.ttsAudio.style.display = 'none';
+        elements.downloadTtsBtn.style.display = 'none';
+      }
+
+      // Reset state
       transcriptData = [];
       resetSubtitleState();
       elements.transcriptList.innerHTML = '';
       elements.trackSelect.innerHTML = '<option value="">Select a track...</option>';
       updateSubtitleText(null);
+      activeTtsRequestId = null;
+      activeTtsBatchId = null;
+      browserTtsActive = false;
+      updateStopButtonVisibility();
       detectVideoId();
-      log('Navigation detected, state reset');
+      log('Navigation detected, resources cleaned up and state reset');
     }
   }
 

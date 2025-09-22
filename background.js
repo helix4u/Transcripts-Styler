@@ -30,6 +30,16 @@ function slashTrim(s) {
   return s?.replace(/\/+$/, '') || '';
 }
 
+function buildApiUrl(baseUrl, path) {
+  const base = slashTrim(baseUrl || '');
+  const seg = path.startsWith('/') ? path : `/${path}`;
+  // Avoid double /v1 when base already ends with /v1
+  if (/\/v1$/i.test(base) && seg.startsWith('/v1/')) {
+    return `${base}${seg.slice(3)}`; // remove the leading /v1 from seg
+  }
+  return `${base}${seg}`;
+}
+
 function pickMime(response) {
   const ct = response.headers.get('content-type') || '';
   if (ct.includes('audio/mpeg') || ct.includes('audio/mp3')) return 'audio/mpeg';
@@ -52,7 +62,88 @@ function fetchWithCreds(url, options = {}) {
   return fetch(url, { credentials: 'include', ...options });
 }
 
-const abortControllers = new Map();
+
+// Directly call the helper's local backend to obtain the exact text shown in <pre id="output">
+async function fetchFromLocalTranscriptApi(videoId, lang, preferAsr = false) {
+  if (!videoId) {
+    throw new Error('Video ID required');
+  }
+
+  const API_BASE = 'http://127.0.0.1:17653';
+  const params = new URLSearchParams();
+  params.set('videoId', videoId);
+  if (lang) {
+    params.set('lang', lang.trim());
+  }
+  if (preferAsr) {
+    params.set('prefer_asr', 'true');
+  }
+  params.set('format', 'segments');
+
+  const url = `${API_BASE}/api/transcript?${params.toString()}`;
+  log(`Calling local transcript API: ${url}`);
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10000);
+  try {
+    const resp = await fetchWithCreds(url, {
+      headers: { Accept: 'application/json' },
+      signal: controller.signal
+    });
+    clearTimeout(timeout);
+
+    if (!resp.ok) {
+      const message = await resp.text();
+      throw new Error(`Local helper error ${resp.status}: ${message}`);
+    }
+
+    const data = await resp.json();
+    if (!data || !Array.isArray(data.segments) || !data.segments.length) {
+      throw new Error('Local helper returned no segments');
+    }
+    return data;
+  } catch (error) {
+    clearTimeout(timeout);
+    logError('Local transcript API failed', error.message || error);
+    throw error;
+  }
+}
+async function fetchLocalTrackList(videoId) {
+  if (!videoId) {
+    throw new Error('Video ID required');
+  }
+  const API_BASE = 'http://127.0.0.1:17653';
+  const params = new URLSearchParams();
+  params.set('videoId', videoId);
+
+  const url = `${API_BASE}/api/tracks?${params.toString()}`;
+  log(`Fetching track list from local helper: ${url}`);
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 8000);
+  try {
+    const resp = await fetchWithCreds(url, {
+      headers: { Accept: 'application/json' },
+      signal: controller.signal
+    });
+    clearTimeout(timeout);
+
+    if (!resp.ok) {
+      const message = await resp.text();
+      throw new Error(`Local helper error ${resp.status}: ${message}`);
+    }
+
+    const data = await resp.json();
+    if (!data || !Array.isArray(data.tracks)) {
+      throw new Error('Local helper returned no track list');
+    }
+    return data;
+  } catch (error) {
+    clearTimeout(timeout);
+    logError('Local track list fetch failed', error.message || error);
+    throw error;
+  }
+}const abortControllers = new Map();
 const batchControllers = new Map();
 const requestToBatch = new Map();
 
@@ -141,367 +232,120 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   log(`Received message: ${action}`, data ? Object.keys(data) : 'no data');
 
   switch (action) {
-    case 'LIST_TRACKS':
-      handleListTracks(data, sendResponse);
-      return true; // async response
+  case 'LIST_TRACKS':
+    handleListTracks(data, sendResponse);
+    return true; // async response
 
-    case 'FETCH_TRANSCRIPT':
-      handleFetchTranscript(data, sendResponse);
-      return true; // async response
+  case 'FETCH_TRANSCRIPT':
+    handleFetchTranscript(data, sendResponse);
+    return true; // async response
 
-    case 'LLM_CALL':
-      handleLLMCall(data, sendResponse);
-      return true; // async response
+  case 'LLM_CALL':
+    handleLLMCall(data, sendResponse);
+    return true; // async response
 
-    case 'TTS_SPEAK':
-      handleTTSSpeak(data, sendResponse);
-      return true; // async response
+  case 'TTS_SPEAK':
+    handleTTSSpeak(data, sendResponse);
+    return true; // async response
 
-    case 'TTS_AZURE_VOICES':
-      handleAzureVoices(data, sendResponse);
-      return true; // async response
+  case 'TTS_AZURE_VOICES':
+    handleAzureVoices(data, sendResponse);
+    return true; // async response
 
-    case 'GET_PREFS':
-      handleGetPrefs(data, sendResponse);
-      return true; // async response
+  case 'GET_PREFS':
+    handleGetPrefs(data, sendResponse);
+    return true; // async response
 
-    case 'SET_PREFS':
-      handleSetPrefs(data, sendResponse);
-      return true; // async response
+  case 'SET_PREFS':
+    handleSetPrefs(data, sendResponse);
+    return true; // async response
 
-    case 'ABORT_REQUESTS':
-      handleAbortRequests(data, sendResponse);
-      return false;
+  case 'ABORT_REQUESTS':
+    handleAbortRequests(data, sendResponse);
+    return false;
 
-    default:
-      log(`Unknown action: ${action}`);
-      sendResponse({ success: false, error: 'Unknown action' });
-      return false;
+  default:
+    log(`Unknown action: ${action}`);
+    sendResponse({ success: false, error: 'Unknown action' });
+    return false;
   }
 });
 
 // Track listing handler
 async function handleListTracks(data, sendResponse) {
-  const start = Date.now();
+  const started = Date.now();
   try {
     const { videoId } = data;
     if (!videoId) {
       throw new Error('Video ID required');
     }
 
-    log(`Listing tracks for video: ${videoId}`);
+    const payload = await fetchLocalTrackList(videoId);
+    const tracks = (payload.tracks || []).map((track, index) => ({
+      lang: track.lang || '',
+      language: track.language || track.name || track.lang || '',
+      name: track.name || track.language || track.lang || `Track ${index + 1}`,
+      isGenerated: Boolean(track.isGenerated),
+      isTranslatable: Boolean(track.isTranslatable),
+      translationLanguages: track.translationLanguages || [],
+      source: 'local-helper'
+    }));
 
-    const endpoints = [
-      `https://video.google.com/timedtext?type=list&v=${videoId}`,
-      `https://www.youtube.com/api/timedtext?type=list&v=${videoId}`,
-      // Additional fallback with different parameters
-      `https://video.google.com/timedtext?type=list&v=${videoId}&hl=en`,
-      `https://www.youtube.com/api/timedtext?type=list&v=${videoId}&hl=en`
-    ];
-
-    let xml = null;
-    let lastStatus = null;
-
-    for (const endpoint of endpoints) {
-      log(`Trying track list endpoint: ${endpoint}`);
-      const response = await fetchWithCreds(endpoint);
-      lastStatus = `${response.status} ${response.statusText}`;
-      log(`Track list response: ${lastStatus}`);
-      if (!response.ok) {
-        log(`Track list request to ${endpoint} failed: ${lastStatus}`);
-        continue;
+    log(`Local helper returned ${tracks.length} tracks in ${Date.now() - started}ms`);
+    sendResponse({
+      success: true,
+      data: {
+        videoId: payload.videoId || videoId,
+        tracks
       }
-      const text = await response.text();
-      log(`Track list response length: ${text.length}`);
-      if (!text.trim()) {
-        log(`Track list response from ${endpoint} was empty`);
-        continue;
-      }
-      xml = text;
-      log(`Successfully retrieved track list from ${endpoint}`);
-      break;
-    }
-
-    if (!xml) {
-      log('No caption list available from timedtext endpoints');
-      sendResponse({ success: true, data: '<trackList></trackList>' });
-      return;
-    }
-
-    log(`Track list fetched in ${Date.now() - start}ms, length: ${xml.length}`);
-
-    sendResponse({ success: true, data: xml });
+    });
   } catch (error) {
     logError('LIST_TRACKS failed:', error.message);
     sendResponse({ success: false, error: error.message });
   }
 }
-
-// Transcript fetching handler
 async function handleFetchTranscript(data, sendResponse) {
-  const start = Date.now();
+  const started = Date.now();
   try {
-    const { videoId, lang = 'en', name = '', baseUrl = '' } = data;
-    if (!videoId && !baseUrl) {
+    const { videoId, lang = 'en', preferAsr = false } = data;
+    if (!videoId) {
       throw new Error('Video ID required');
     }
 
-    log(`=== FETCH_TRANSCRIPT START ===`);
-    log(`Input data:`, { videoId, lang, name, baseUrl: baseUrl ? 'present' : 'empty' });
+    let transcript;
+    try {
+      transcript = await fetchFromLocalTranscriptApi(videoId, lang, preferAsr);
+    } catch (initialError) {
+      if (preferAsr) {
+        log('Primary local fetch failed with prefer_asr=true, retrying without ASR preference');
+        transcript = await fetchFromLocalTranscriptApi(videoId, lang, false);
+      } else {
+        throw initialError;
+      }
+    }
+
+    const segments = transcript.segments || [];
     log(
-      `Fetching transcript: video=${videoId || 'n/a'}, lang=${lang}, name=${name}, baseUrl=${baseUrl ? 'inline' : 'timedtext'}`
+      `Transcript fetched via local helper in ${Date.now() - started}ms (segments=${segments.length})`
     );
 
-    const attemptCaptionFetch = async (urlString, formatHint) => {
-      log(`Attempting to fetch: ${urlString} (format hint: ${formatHint})`);
-      const response = await fetchWithCreds(urlString);
-      log(`Response status: ${response.status} ${response.statusText}`);
-      if (!response.ok) {
-        log(`Caption fetch failed (${response.status} ${response.statusText}) for ${urlString}`);
-        return null;
+    sendResponse({
+      success: true,
+      data: {
+        format: 'segments',
+        segments,
+        videoId: transcript.videoId || videoId,
+        language: transcript.language || lang,
+        languageName: transcript.languageName || null,
+        generated: Boolean(transcript.generated),
+        source: transcript.source || 'local-helper'
       }
-      const text = await response.text();
-      log(`Response length: ${text.length} characters`);
-      if (!text.trim()) {
-        log('Caption response empty');
-        return null;
-      }
-      const inferredFormat = formatHint || inferFormatFromUrl(urlString);
-      log(`Successfully fetched transcript, format: ${inferredFormat}`);
-      return {
-        text,
-        format: inferredFormat
-      };
-    };
-
-    const inferFormatFromUrl = urlString => {
-      try {
-        const fmt = new URL(urlString).searchParams.get('fmt');
-        if (fmt) {
-          return fmt.toLowerCase();
-        }
-      } catch (error) {
-        logError('Failed to infer format from URL', error.message);
-      }
-      return 'vtt';
-    };
-
-    let transcript = null;
-
-    if (baseUrl) {
-      log(`Using baseUrl approach`);
-      const decodedUrl = baseUrl.replace(/\u0026/g, '&');
-      log(`Decoded baseUrl: ${decodedUrl}`);
-      const candidates = [];
-      try {
-        const urlObj = new URL(decodedUrl);
-        const currentFmt = (urlObj.searchParams.get('fmt') || '').toLowerCase();
-        log(`Current fmt from baseUrl: ${currentFmt}`);
-        const pushCandidate = (fmt, label) => {
-          const clone = new URL(urlObj);
-          if (fmt === null) {
-            clone.searchParams.delete('fmt');
-          } else if (fmt) {
-            clone.searchParams.set('fmt', fmt);
-          }
-          const tag = label || fmt || currentFmt || 'vtt';
-          candidates.push({ url: clone.toString(), format: tag });
-        };
-
-        if (currentFmt === 'vtt') {
-          pushCandidate('vtt', 'vtt');
-          pushCandidate('json3', 'json3');
-        } else {
-          pushCandidate('vtt', 'vtt');
-          pushCandidate('json3', 'json3');
-          if (currentFmt && currentFmt !== 'vtt') {
-            pushCandidate(currentFmt, currentFmt);
-          }
-          pushCandidate('srv3', 'srv3');
-          pushCandidate(null, 'ttml');
-        }
-        log(`Generated ${candidates.length} candidate URLs from baseUrl`);
-      } catch (error) {
-        logError('Failed to construct caption URLs from baseUrl', error.message);
-        candidates.push({ url: decodedUrl, format: 'vtt' });
-      }
-
-      for (const candidate of candidates) {
-        log(`Trying candidate: ${candidate.url} (format: ${candidate.format})`);
-        transcript = await attemptCaptionFetch(candidate.url, candidate.format);
-        if (transcript) {
-          log(`Caption fetched via baseUrl using fmt=${candidate.format}`);
-          break;
-        }
-      }
-    }
-
-    if (!transcript) {
-      log(`BaseUrl approach failed, using fallback timedtext approach`);
-      if (!videoId) {
-        throw new Error('Unable to fetch transcript with provided data');
-      }
-
-      // Multiple fallback endpoints and formats with different parameter orders
-      const endpointConfigs = [
-        {
-          base: 'https://video.google.com/timedtext',
-          formats: ['vtt', 'srv3', 'json3'],
-          paramOrder: ['lang', 'v', 'fmt', 'name']
-        },
-        {
-          base: 'https://www.youtube.com/api/timedtext',
-          formats: ['vtt', 'srv3', 'json3'],
-          paramOrder: ['lang', 'v', 'fmt', 'name']
-        },
-        // Try different parameter orders that YouTube might expect
-        {
-          base: 'https://video.google.com/timedtext',
-          formats: ['vtt', 'srv3', 'json3'],
-          paramOrder: ['v', 'lang', 'fmt', 'name']
-        },
-        {
-          base: 'https://www.youtube.com/api/timedtext',
-          formats: ['vtt', 'srv3', 'json3'],
-          paramOrder: ['v', 'lang', 'fmt', 'name']
-        },
-        // Try without fmt parameter (some endpoints might default to a format)
-        {
-          base: 'https://video.google.com/timedtext',
-          formats: [null], // null means no fmt parameter
-          paramOrder: ['lang', 'v', 'name']
-        },
-        {
-          base: 'https://www.youtube.com/api/timedtext',
-          formats: [null],
-          paramOrder: ['lang', 'v', 'name']
-        }
-      ];
-
-      const buildUrl = (config, fmt) => {
-        const params = [];
-        for (const param of config.paramOrder) {
-          if (param === 'v') {
-            params.push(`${param}=${encodeURIComponent(videoId)}`);
-          } else if (param === 'lang') {
-            params.push(`${param}=${encodeURIComponent(lang)}`);
-          } else if (param === 'fmt' && fmt) {
-            params.push(`${param}=${encodeURIComponent(fmt)}`);
-          } else if (param === 'name' && name) {
-            params.push(`${param}=${encodeURIComponent(name)}`);
-          }
-        }
-        return `${config.base}?${params.join('&')}`;
-      };
-
-      for (const config of endpointConfigs) {
-        for (const fmt of config.formats) {
-          const url = buildUrl(config, fmt);
-          log(`Trying endpoint: ${url}`);
-
-          try {
-            const response = await fetchWithCreds(url, {
-              method: 'GET',
-              headers: {
-                Accept: '*/*',
-                'Accept-Language': 'en-US,en;q=0.9',
-                'Cache-Control': 'no-cache',
-                Pragma: 'no-cache'
-              }
-            });
-            log(`Response: ${response.status} ${response.statusText}`);
-
-            if (response.ok) {
-              const text = await response.text();
-              log(`Response content length: ${text.length}`);
-              if (text.trim()) {
-                log(
-                  `Success! Retrieved ${text.length} characters using ${config.base} with fmt=${fmt || 'none'}`
-                );
-                transcript = { text, format: fmt || 'vtt' };
-                break;
-              } else {
-                log(`Empty response from ${config.base} with fmt=${fmt || 'none'}`);
-              }
-            } else {
-              log(
-                `Failed with ${config.base} fmt=${fmt || 'none'}: ${response.status} ${response.statusText}`
-              );
-            }
-          } catch (fetchError) {
-            log(`Network error with ${config.base}: ${fetchError.message}`);
-          }
-        }
-        if (transcript) break;
-      }
-
-      if (!transcript) {
-        log(`All fallback attempts failed - trying alternative approaches`);
-
-        // Try a few more desperate attempts
-        const desperateEndpoints = [
-          // Try without any format specification
-          `https://video.google.com/timedtext?v=${videoId}&lang=${encodeURIComponent(lang)}`,
-          `https://www.youtube.com/api/timedtext?v=${videoId}&lang=${encodeURIComponent(lang)}`,
-          // Try with different language codes
-          `https://video.google.com/timedtext?v=${videoId}&lang=en`,
-          `https://www.youtube.com/api/timedtext?v=${videoId}&lang=en`,
-          // Try with minimal parameters
-          `https://video.google.com/timedtext?v=${videoId}`,
-          `https://www.youtube.com/api/timedtext?v=${videoId}`
-        ];
-
-        for (const url of desperateEndpoints) {
-          log(`Desperate attempt: ${url}`);
-          try {
-            const response = await fetchWithCreds(url, {
-              method: 'GET',
-              headers: {
-                Accept: '*/*',
-                'Accept-Language': 'en-US,en;q=0.9'
-              }
-            });
-
-            log(`Desperate response: ${response.status} ${response.statusText}`);
-
-            if (response.ok) {
-              const text = await response.text();
-              if (text.trim() && text.length > 10) {
-                // More than just whitespace
-                log(`Desperate success! Retrieved ${text.length} characters from ${url}`);
-                transcript = { text, format: 'vtt' }; // Assume VTT format
-                break;
-              } else {
-                log(`Desperate attempt returned empty or minimal content`);
-              }
-            }
-          } catch (error) {
-            log(`Desperate attempt failed: ${error.message}`);
-          }
-        }
-
-        if (!transcript) {
-          log(`All attempts failed including desperate measures`);
-          throw new Error(
-            'Unable to fetch transcript from any endpoint. Check debug logs for detailed error information.'
-          );
-        }
-      }
-    }
-
-    log(`Transcript fetched in ${Date.now() - start}ms, format: ${transcript.format}`);
-    log(`=== FETCH_TRANSCRIPT SUCCESS ===`);
-
-    sendResponse({ success: true, data: transcript });
+    });
   } catch (error) {
     logError('FETCH_TRANSCRIPT failed:', error.message);
-    log(`=== FETCH_TRANSCRIPT FAILED ===`);
     sendResponse({ success: false, error: error.message });
   }
 }
-
-// LLM call handler
-
 async function handleLLMCall(data, sendResponse) {
   const start = Date.now();
   const {
@@ -514,17 +358,34 @@ async function handleLLMCall(data, sendResponse) {
     asciiOnly = false,
     requestId,
     batchId,
-    anthropicVersion
+    anthropicVersion,
+    maxTokens
   } = data;
   const controller = registerAbortController(batchId, requestId);
 
   try {
-    if (!provider || !baseUrl || !apiKey || !model || !userPrompt) {
+    if (!provider || !apiKey || !model || !userPrompt) {
       throw new Error('Missing required parameters');
     }
 
+    // Resolve provider defaults for base URL
+    let resolvedBaseUrl = baseUrl;
+    if (!resolvedBaseUrl || !resolvedBaseUrl.trim()) {
+      if (provider === 'openai') {
+        resolvedBaseUrl = 'https://api.openai.com';
+      } else if (provider === 'anthropic') {
+        resolvedBaseUrl = 'https://api.anthropic.com';
+      }
+    }
+
+    if (!resolvedBaseUrl) {
+      throw new Error('Base URL is required for this provider');
+    }
+
     log(
-      `LLM call: provider=${provider}, model=${model}, baseUrl=${safeUrl(baseUrl)}, asciiOnly=${asciiOnly}`
+      `LLM call: provider=${provider}, model=${model}, baseUrl=${safeUrl(
+        resolvedBaseUrl
+      )}, asciiOnly=${asciiOnly}`
     );
 
     let response;
@@ -532,42 +393,45 @@ async function handleLLMCall(data, sendResponse) {
     switch (provider) {
       case 'openai':
         response = await callOpenAI(
-          baseUrl,
-          apiKey,
-          model,
-          systemPrompt,
-          userPrompt,
-          asciiOnly,
-          controller.signal
-        );
-        break;
+          resolvedBaseUrl,
+        apiKey,
+        model,
+        systemPrompt,
+        userPrompt,
+        asciiOnly,
+          controller.signal,
+          maxTokens
+      );
+      break;
 
       case 'anthropic':
         response = await callAnthropic(
-          baseUrl,
-          apiKey,
-          model,
-          systemPrompt,
-          userPrompt,
-          anthropicVersion || DEFAULT_ANTHROPIC_VERSION,
-          controller.signal
-        );
-        break;
+          resolvedBaseUrl,
+        apiKey,
+        model,
+        systemPrompt,
+        userPrompt,
+        anthropicVersion || DEFAULT_ANTHROPIC_VERSION,
+          controller.signal,
+          maxTokens
+      );
+      break;
 
       case 'openai-compatible':
         response = await callOpenAICompatible(
-          baseUrl,
-          apiKey,
-          model,
-          systemPrompt,
-          userPrompt,
-          asciiOnly,
-          controller.signal
-        );
-        break;
+          resolvedBaseUrl,
+        apiKey,
+        model,
+        systemPrompt,
+        userPrompt,
+        asciiOnly,
+          controller.signal,
+          maxTokens
+      );
+      break;
 
-      default:
-        throw new Error(`Unsupported provider: ${provider}`);
+    default:
+      throw new Error(`Unsupported provider: ${provider}`);
     }
 
     log(`LLM call completed in ${Date.now() - start}ms`);
@@ -587,8 +451,8 @@ async function handleLLMCall(data, sendResponse) {
 
 // OpenAI API call
 
-async function callOpenAI(baseUrl, apiKey, model, systemPrompt, userPrompt, asciiOnly, signal) {
-  const url = `${slashTrim(baseUrl)}/v1/chat/completions`;
+async function callOpenAI(baseUrl, apiKey, model, systemPrompt, userPrompt, asciiOnly, signal, maxTokens) {
+  const url = buildApiUrl(baseUrl, '/v1/chat/completions');
 
   const messages = [];
   if (systemPrompt) {
@@ -603,7 +467,7 @@ async function callOpenAI(baseUrl, apiKey, model, systemPrompt, userPrompt, asci
   const body = {
     model,
     messages,
-    max_tokens: 1000,
+    max_tokens: Number.isFinite(Number(maxTokens)) ? Number(maxTokens) : 1000,
     temperature: 0.7
   };
 
@@ -628,14 +492,14 @@ async function callOpenAI(baseUrl, apiKey, model, systemPrompt, userPrompt, asci
 
 // Anthropic API call
 
-async function callAnthropic(baseUrl, apiKey, model, systemPrompt, userPrompt, version, signal) {
-  const url = `${slashTrim(baseUrl)}/v1/messages`;
+async function callAnthropic(baseUrl, apiKey, model, systemPrompt, userPrompt, version, signal, maxTokens) {
+  const url = buildApiUrl(baseUrl, '/v1/messages');
   const resolvedVersion = version || DEFAULT_ANTHROPIC_VERSION;
   log(`Anthropic call using version ${resolvedVersion}`);
 
   const body = {
     model,
-    max_output_tokens: 1000,
+    max_output_tokens: Number.isFinite(Number(maxTokens)) ? Number(maxTokens) : 1000,
     temperature: 0.7,
     messages: [
       {
@@ -683,9 +547,10 @@ async function callOpenAICompatible(
   systemPrompt,
   userPrompt,
   asciiOnly,
-  signal
+  signal,
+  maxTokens
 ) {
-  const url = `${slashTrim(baseUrl)}/v1/chat/completions`;
+  const url = buildApiUrl(baseUrl, '/v1/chat/completions');
 
   const messages = [];
   if (systemPrompt) {
@@ -700,7 +565,7 @@ async function callOpenAICompatible(
   const body = {
     model,
     messages,
-    max_tokens: 1000,
+    max_tokens: Number.isFinite(Number(maxTokens)) ? Number(maxTokens) : 1000,
     temperature: 0.7
   };
 
@@ -752,24 +617,24 @@ async function handleTTSSpeak(data, sendResponse) {
     let result;
 
     switch (provider) {
-      case 'openai':
-        result = await ttsOpenAI(baseUrl, apiKey, text, voice, format, controller.signal);
-        break;
+    case 'openai':
+      result = await ttsOpenAI(baseUrl, apiKey, text, voice, format, controller.signal);
+      break;
 
-      case 'openai-compatible':
-        result = await ttsOpenAICompatible(baseUrl, apiKey, text, voice, format, controller.signal);
-        break;
+    case 'openai-compatible':
+      result = await ttsOpenAICompatible(baseUrl, apiKey, text, voice, format, controller.signal);
+      break;
 
-      case 'kokoro':
-        result = await ttsKokoro(baseUrl, text, voice, controller.signal);
-        break;
+    case 'kokoro':
+      result = await ttsKokoro(baseUrl, text, voice, controller.signal);
+      break;
 
-      case 'azure':
-        result = await ttsAzure(apiKey, azureRegion, text, voice, format, controller.signal);
-        break;
+    case 'azure':
+      result = await ttsAzure(apiKey, azureRegion, text, voice, format, controller.signal);
+      break;
 
-      default:
-        throw new Error(`Unsupported TTS provider: ${provider}`);
+    default:
+      throw new Error(`Unsupported TTS provider: ${provider}`);
     }
 
     log(`TTS completed in ${Date.now() - start}ms, audioSize=${result.audioData?.length || 0}`);
@@ -790,7 +655,7 @@ async function handleTTSSpeak(data, sendResponse) {
 // OpenAI TTS
 
 async function ttsOpenAI(baseUrl, apiKey, text, voice = 'alloy', format = 'mp3', signal) {
-  const url = `${slashTrim(baseUrl)}/v1/audio/speech`;
+  const url = buildApiUrl(baseUrl, '/v1/audio/speech');
   const normalizedFormat = (format || 'mp3').toLowerCase();
   const responseFormatMap = {
     mp3: 'mp3',
@@ -842,7 +707,7 @@ async function ttsOpenAICompatible(
   format = 'mp3',
   signal
 ) {
-  const url = `${slashTrim(baseUrl)}/v1/audio/speech`;
+  const url = buildApiUrl(baseUrl, '/v1/audio/speech');
   const normalizedFormat = (format || 'mp3').toLowerCase();
   const responseFormatMap = {
     mp3: 'mp3',
@@ -935,9 +800,9 @@ async function ttsAzure(apiKey, region, text, voice = 'en-US-AriaNeural', format
   const ssml = `
     <speak version='1.0' xml:lang='en-US'>
       <voice name='${voice}'>${text.replace(/[<>&'"]/g, m => {
-        const map = { '<': '&lt;', '>': '&gt;', '&': '&amp;', "'": '&apos;', '"': '&quot;' };
-        return map[m];
-      })}</voice>
+  const map = { '<': '&lt;', '>': '&gt;', '&': '&amp;', "'": '&apos;', '"': '&quot;' };
+  return map[m];
+})}</voice>
     </speak>
   `;
 

@@ -167,3 +167,18 @@ docs/build/
 *.tar.gz
 *.rar
 *.7z
+
+# Python: caches and virtual environments (repo-wide and in yt-transcript-local)
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+yt-transcript-local/__pycache__/
+yt-transcript-local/.venv/
+yt-transcript-local/.pytest_cache/
+yt-transcript-local/.mypy_cache/
