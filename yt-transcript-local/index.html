@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Plain YouTube Transcript — Local Backend</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { --fg:#e6e6e6; --bg:#121212; --muted:#9a9a9a; --accent:#6ab; }
+  html,body { margin:0; padding:0; background:var(--bg); color:var(--fg); font-family:system-ui, Segoe UI, Roboto, Arial, sans-serif; }
+  header { padding:16px 20px; border-bottom:1px solid #222; }
+  h1 { margin:0; font-size:18px; font-weight:600; }
+  main { padding:16px 20px; max-width:1000px; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; margin:8px 0 16px 0; }
+  input[type="url"], input[type="text"] { flex:1 1 520px; padding:10px 12px; background:#181818; color:var(--fg); border:1px solid #2a2a2a; border-radius:6px; }
+  button { padding:10px 14px; border:1px solid #2a2a2a; background:#1e1e1e; color:var(--fg); border-radius:6px; cursor:pointer; }
+  button:hover { border-color:#3a3a3a; }
+  .muted { color:var(--muted); font-size:13px; }
+  .status { margin:8px 0 12px 0; font-size:13px; color:var(--muted); white-space:pre-wrap; }
+  .actions { display:flex; gap:8px; margin:8px 0 12px 0; }
+  pre#output { white-space:pre-wrap; background:#0f0f0f; padding:16px; border:1px solid #222; border-radius:6px; min-height:180px; font-size:15px; line-height:1.5; }
+  .opts { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  label { font-size:13px; color:var(--muted); }
+  a { color:var(--accent); text-decoration:none; }
+  a:hover { text-decoration:underline; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Plain YouTube Transcript</h1>
+  <div class="muted">This UI calls a local API at <code>http://127.0.0.1:17653</code>. Run <code>start_server.bat</code> first.</div>
+  <div class="muted">Get the server code: <a href="https://github.com/helix4u/yt-transcript-local/" target="_blank" rel="noopener">helix4u/yt-transcript-local</a></div>
+</header>
+<main>
+  <div class="row">
+    <input id="urlInput" type="url" placeholder="https://youtu.be/VIDEO or https://www.youtube.com/watch?v=VIDEO">
+    <button id="loadBtn">Load</button>
+    <button id="clearBtn">Clear</button>
+  </div>
+
+  <div class="opts">
+    <label>Lang list <input id="lang" type="text" value="en,en-US,en-GB"></label>
+    <label><input id="asr" type="checkbox"> prefer auto captions if manual missing</label>
+  </div>
+
+  <div class="status" id="status"></div>
+
+  <div class="actions">
+    <button id="copyBtn">Copy</button>
+    <button id="downloadBtn">Download .txt</button>
+  </div>
+
+  <pre id="output" aria-label="Transcript output"></pre>
+</main>
+
+<script>
+(function(){
+  const API_BASE = "http://127.0.0.1:17653";
+
+  const $ = sel => document.querySelector(sel);
+  const statusEl = $('#status');
+  const outputEl = $('#output');
+  const urlInput = $('#urlInput');
+  const langInput = $('#lang');
+  const asrInput  = $('#asr');
+
+  function log(msg){ statusEl.textContent = msg || ''; }
+
+  function readQueryUrl() {
+    const qs = window.location.search;
+    if (!qs) return null;
+    let s = qs.substring(1);
+    if (s.startsWith('=')) s = s.substring(1);
+    if (s.toLowerCase().startsWith('url=')) s = s.substring(4);
+    try { s = decodeURIComponent(s); } catch {}
+    return s || null;
+  }
+
+  function extractVideoId(input) {
+    if (!input) return null;
+    const ID_RE = /^[a-zA-Z0-9_-]{11}$/;
+    const str = input.trim();
+    if (ID_RE.test(str)) return str;
+    let u;
+    try { u = new URL(str); } catch { return null; }
+    const host = u.hostname.replace(/^www\./, '').toLowerCase();
+    const path = u.pathname;
+    if (host === 'youtu.be') {
+      const id = path.split('/').filter(Boolean)[0];
+      return ID_RE.test(id) ? id : null;
+    }
+    if (host.endsWith('youtube.com') || host.endsWith('youtube-nocookie.com')) {
+      if (path === '/watch') {
+        const v = u.searchParams.get('v');
+        return v && ID_RE.test(v) ? v : null;
+      }
+      const segs = path.split('/').filter(Boolean);
+      if (segs.length >= 2 && ['shorts','embed','live'].includes(segs[0])) {
+        return ID_RE.test(segs[1]) ? segs[1] : null;
+      }
+    }
+    return null;
+  }
+
+  async function pingLocal() {
+    const ctrl = new AbortController();
+    const to = setTimeout(()=>ctrl.abort(), 1500);
+    try {
+      const r = await fetch(API_BASE + "/api/ping", { signal: ctrl.signal });
+      clearTimeout(to);
+      return r.ok;
+    } catch {
+      clearTimeout(to);
+      return false;
+    }
+  }
+
+  async function loadFrom(inputUrl) {
+    outputEl.textContent = '';
+    log('');
+
+    if (!(await pingLocal())) {
+      log('Local API not reachable at ' + API_BASE + '. Start the server with start_server.bat.');
+      return;
+    }
+
+    if (!inputUrl || !inputUrl.trim()) { log('Provide a YouTube share url.'); return; }
+    const vid = extractVideoId(inputUrl);
+    if (!vid) { log('Could not extract a valid video id from that url.'); return; }
+
+    const params = new URLSearchParams();
+    params.set('videoId', vid);
+    params.set('lang', (langInput.value || 'en').trim());
+    if (asrInput.checked) params.set('prefer_asr', 'true');
+    params.set('format', 'txt');
+
+    const endpoint = API_BASE + '/api/transcript?' + params.toString();
+    log('Fetching transcript...');
+    try {
+      const resp = await fetch(endpoint);
+      if (!resp.ok) {
+        let detail = '';
+        try { detail = (await resp.json()).detail; } catch {}
+        throw new Error(detail || ('HTTP ' + resp.status));
+      }
+      const text = await resp.text();
+      outputEl.textContent = text.trim();
+      log('Done.');
+    } catch (e) {
+      log('Failed: ' + (e && e.message ? e.message : 'Unknown error'));
+    }
+  }
+
+  document.getElementById('loadBtn').addEventListener('click', () => loadFrom(urlInput.value));
+  document.getElementById('clearBtn').addEventListener('click', () => { outputEl.textContent=''; log(''); });
+  document.getElementById('copyBtn').addEventListener('click', async () => {
+    const t = outputEl.textContent || '';
+    if (!t.trim()) { log('Nothing to copy.'); return; }
+    try { await navigator.clipboard.writeText(t); log('Copied.'); } catch { log('Clipboard write failed.'); }
+  });
+  document.getElementById('downloadBtn').addEventListener('click', () => {
+    const t = outputEl.textContent || '';
+    if (!t.trim()) { log('Nothing to download.'); return; }
+    const blob = new Blob([t], { type:'text/plain;charset=utf-8' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'transcript.txt';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(a.href);
+  });
+
+  const q = readQueryUrl();
+  if (q) { urlInput.value = q; loadFrom(q); }
+})();
+</script>
+</body>
+</html>
