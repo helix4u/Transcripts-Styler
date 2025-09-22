@@ -92,6 +92,7 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
         <label>Font Size:</label>
         <input type="number" id="yt-font-size" min="10" max="48" value="24" style="width: 70px;">
         <span>px</span>
+        <button id="yt-apply-font" title="Apply subtitle/UI font size">Apply</button>
       </div>
       <div class="yt-controls">
         <label>Output Language:</label>
@@ -305,6 +306,7 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
     browserVoiceSelect: document.getElementById('yt-browser-voice-select'),
     ttsRate: document.getElementById('yt-tts-rate'),
     rateValue: document.getElementById('yt-rate-value'),
+    applyFontBtn: document.getElementById('yt-apply-font'),
     generateTtsBtn: document.getElementById('yt-generate-tts-btn'),
     stopTtsBtn: document.getElementById('yt-stop-tts-btn'),
     downloadTtsBtn: document.getElementById('yt-download-tts-btn'),
@@ -678,7 +680,7 @@ Context (next fragments):
     const resolved = Number.isFinite(size) && size > 0 ? size : DEFAULT_FONT_SIZE;
     overlay.style.setProperty('--yt-font-size', `${resolved}px`);
     // Also scale the on-video subtitle overlay
-    overlay.style.setProperty('--ts-subtitle-font-size', `${Math.round(resolved * 1.85)}px`);
+    document.body.style.setProperty('--ts-subtitle-font-size', `${Math.round(resolved * 1.85)}px`);
   }
 
   // Preset management
@@ -2135,6 +2137,17 @@ ${text}
       activeSegmentIndex = index;
       updateSubtitleText(segment);
       applyActiveHighlight(true);
+    });
+  }
+
+  // Apply font button explicitly updates subtitle overlay and saves
+  if (elements.applyFontBtn) {
+    elements.applyFontBtn.addEventListener('click', () => {
+      handleFontSizeChange();
+      const size = parseInt(elements.fontSize.value, 10);
+      const resolved = Number.isFinite(size) && size > 0 ? size : DEFAULT_FONT_SIZE;
+      document.body.style.setProperty('--ts-subtitle-font-size', `${Math.round(resolved * 1.85)}px`);
+      setStatus('Applied font size');
     });
   }
 
