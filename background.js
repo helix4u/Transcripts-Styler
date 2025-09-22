@@ -359,7 +359,8 @@ async function handleLLMCall(data, sendResponse) {
     requestId,
     batchId,
     anthropicVersion,
-    maxTokens
+    maxTokens,
+    temperature
   } = data;
   const controller = registerAbortController(batchId, requestId);
 
@@ -394,44 +395,47 @@ async function handleLLMCall(data, sendResponse) {
       case 'openai':
         response = await callOpenAI(
           resolvedBaseUrl,
-        apiKey,
-        model,
-        systemPrompt,
-        userPrompt,
-        asciiOnly,
+          apiKey,
+          model,
+          systemPrompt,
+          userPrompt,
+          asciiOnly,
           controller.signal,
-          maxTokens
-      );
-      break;
+          maxTokens,
+          temperature
+        );
+        break;
 
       case 'anthropic':
         response = await callAnthropic(
           resolvedBaseUrl,
-        apiKey,
-        model,
-        systemPrompt,
-        userPrompt,
-        anthropicVersion || DEFAULT_ANTHROPIC_VERSION,
+          apiKey,
+          model,
+          systemPrompt,
+          userPrompt,
+          anthropicVersion || DEFAULT_ANTHROPIC_VERSION,
           controller.signal,
-          maxTokens
-      );
-      break;
+          maxTokens,
+          temperature
+        );
+        break;
 
       case 'openai-compatible':
         response = await callOpenAICompatible(
           resolvedBaseUrl,
-        apiKey,
-        model,
-        systemPrompt,
-        userPrompt,
-        asciiOnly,
+          apiKey,
+          model,
+          systemPrompt,
+          userPrompt,
+          asciiOnly,
           controller.signal,
-          maxTokens
-      );
-      break;
+          maxTokens,
+          temperature
+        );
+        break;
 
-    default:
-      throw new Error(`Unsupported provider: ${provider}`);
+      default:
+        throw new Error(`Unsupported provider: ${provider}`);
     }
 
     log(`LLM call completed in ${Date.now() - start}ms`);
@@ -451,7 +455,7 @@ async function handleLLMCall(data, sendResponse) {
 
 // OpenAI API call
 
-async function callOpenAI(baseUrl, apiKey, model, systemPrompt, userPrompt, asciiOnly, signal, maxTokens) {
+async function callOpenAI(baseUrl, apiKey, model, systemPrompt, userPrompt, asciiOnly, signal, maxTokens, temperature) {
   const url = buildApiUrl(baseUrl, '/v1/chat/completions');
 
   const messages = [];
@@ -468,7 +472,7 @@ async function callOpenAI(baseUrl, apiKey, model, systemPrompt, userPrompt, asci
     model,
     messages,
     max_tokens: Number.isFinite(Number(maxTokens)) ? Number(maxTokens) : 1000,
-    temperature: 0.7
+    temperature: Number.isFinite(Number(temperature)) ? Number(temperature) : 0.7
   };
 
   const response = await fetchWithCreds(url, {
@@ -492,7 +496,7 @@ async function callOpenAI(baseUrl, apiKey, model, systemPrompt, userPrompt, asci
 
 // Anthropic API call
 
-async function callAnthropic(baseUrl, apiKey, model, systemPrompt, userPrompt, version, signal, maxTokens) {
+async function callAnthropic(baseUrl, apiKey, model, systemPrompt, userPrompt, version, signal, maxTokens, temperature) {
   const url = buildApiUrl(baseUrl, '/v1/messages');
   const resolvedVersion = version || DEFAULT_ANTHROPIC_VERSION;
   log(`Anthropic call using version ${resolvedVersion}`);
@@ -500,7 +504,7 @@ async function callAnthropic(baseUrl, apiKey, model, systemPrompt, userPrompt, v
   const body = {
     model,
     max_output_tokens: Number.isFinite(Number(maxTokens)) ? Number(maxTokens) : 1000,
-    temperature: 0.7,
+    temperature: Number.isFinite(Number(temperature)) ? Number(temperature) : 0.7,
     messages: [
       {
         role: 'user',
@@ -548,7 +552,8 @@ async function callOpenAICompatible(
   userPrompt,
   asciiOnly,
   signal,
-  maxTokens
+  maxTokens,
+  temperature
 ) {
   const url = buildApiUrl(baseUrl, '/v1/chat/completions');
 
@@ -566,7 +571,7 @@ async function callOpenAICompatible(
     model,
     messages,
     max_tokens: Number.isFinite(Number(maxTokens)) ? Number(maxTokens) : 1000,
-    temperature: 0.7
+    temperature: Number.isFinite(Number(temperature)) ? Number(temperature) : 0.7
   };
 
   const response = await fetchWithCreds(url, {

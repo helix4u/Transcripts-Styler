@@ -138,6 +138,10 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
         <label><input type="checkbox" id="yt-ascii-only"> ASCII-only output</label>
       </div>
       <div class="yt-controls">
+        <label>Temperature:</label>
+        <input type="number" id="yt-temperature" min="0" max="2" step="0.1" value="0.7" style="width: 80px;">
+      </div>
+      <div class="yt-controls">
         <label>Max tokens:</label>
         <input type="number" id="yt-max-tokens" min="64" max="320000" value="1000" style="width: 80px;">
       </div>
@@ -282,6 +286,7 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
     blocklist: document.getElementById('yt-blocklist'),
     singleCall: document.getElementById('yt-single-call'),
     maxTokens: document.getElementById('yt-max-tokens'),
+    temperature: document.getElementById('yt-temperature'),
     styleText: document.getElementById('yt-style-text'),
 
     stylePreset: document.getElementById('yt-style-preset'),
@@ -556,8 +561,8 @@ Context (next fragments):
         // Load preferences
         if (ytro_prefs) {
           setIf(elements.videoId, ytro_prefs.videoId);
-        setIf(elements.langPrefs, ytro_prefs.langPrefs);
-        setIf(elements.fontSize, ytro_prefs.fontSize);
+    setIf(elements.langPrefs, ytro_prefs.langPrefs);
+    setIf(elements.fontSize, ytro_prefs.fontSize);
           setIf(elements.outputLang, ytro_prefs.outputLang);
           setIf(elements.customLang, ytro_prefs.customLang);
           setIf(elements.provider, ytro_prefs.provider);
@@ -571,6 +576,7 @@ Context (next fragments):
           setIf(elements.blocklist, ytro_prefs.blocklist);
           setIf(elements.singleCall, ytro_prefs.singleCall, 'checked');
           setIf(elements.maxTokens, ytro_prefs.maxTokens);
+          setIf(elements.temperature, ytro_prefs.temperature);
           setIf(elements.styleText, ytro_prefs.styleText);
 
           // TTS settings
@@ -630,6 +636,7 @@ Context (next fragments):
       blocklist: elements.blocklist.value,
       singleCall: elements.singleCall.checked,
       maxTokens: parseInt(elements.maxTokens?.value, 10) || 1000,
+      temperature: parseFloat(elements.temperature?.value) || 0.7,
       styleText: elements.styleText?.value || '',
 
       // TTS settings
@@ -703,6 +710,7 @@ Context (next fragments):
       ttsRate: parseFloat(elements.ttsRate.value) || 1.0,
       singleCall: elements.singleCall.checked,
       maxTokens: parseInt(elements.maxTokens?.value, 10) || 1000,
+      temperature: parseFloat(elements.temperature?.value) || 0.7,
       styleText: elements.styleText?.value || ''
     };
   }
@@ -1217,7 +1225,8 @@ No markdown fences, no commentary.`;
           batchId: activeBatchId,
           requestId: `${activeBatchId}:0`,
           anthropicVersion: elements.anthropicVersion.value.trim(),
-          maxTokens: parseInt(elements.maxTokens?.value, 10) || 1000
+          maxTokens: parseInt(elements.maxTokens?.value, 10) || 1000,
+          temperature: parseFloat(elements.temperature?.value) || 0.7
         });
 
         if (!response?.success) {
