@@ -148,6 +148,34 @@
   border-bottom: 1px solid var(--yt-border-color);
 }
 
+/* Collapsible Sections */
+.yt-section.collapsible .section-header {
+  cursor: pointer;
+  user-select: none;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin: 0;
+  padding: 8px 0;
+}
+
+.yt-section.collapsible .section-header:hover {
+  color: var(--yt-accent-color);
+}
+
+.yt-section.collapsible .collapse-icon {
+  font-size: 12px;
+  transition: transform 0.2s ease;
+}
+
+.yt-section.collapsible .section-content {
+  padding-top: 8px;
+}
+
+.yt-section.collapsible.collapsed .section-content {
+  display: none;
+}
+
 .yt-section:last-child {
   border-bottom: none;
 }
@@ -342,6 +370,20 @@ button:disabled {
   flex: 1;
   font-size: inherit;
   line-height: 1.4;
+}
+
+.yt-speaker-icon {
+  cursor: pointer;
+  margin-right: 8px;
+  font-size: 14px;
+  opacity: 0.7;
+  transition: opacity 0.2s ease;
+  display: inline-block;
+}
+
+.yt-speaker-icon:hover {
+  opacity: 1;
+  transform: scale(1.1);
 }
 
 .yt-original {

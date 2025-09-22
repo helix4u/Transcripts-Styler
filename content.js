@@ -82,8 +82,9 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
     </div>
 
     <!-- Language Preferences Section -->
-    <div class="yt-section">
-      <h4>Language Preferences</h4>
+    <div class="yt-section collapsible" data-section="lang">
+      <h4 class="section-header" onclick="toggleSection('lang')">Language Preferences <span class="collapse-icon">▼</span></h4>
+      <div class="section-content">
       <div class="yt-controls">
         <label>Preferred Languages (comma-separated):</label>
         <input type="text" id="yt-lang-prefs" placeholder="en,es,fr,de,ja" style="width: 100%;">
@@ -113,11 +114,13 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
         </select>
         <input type="text" id="yt-custom-lang" placeholder="Enter custom language" style="display: none; margin-top: 5px;">
       </div>
+      </div>
     </div>
 
     <!-- LLM Controls Section -->
-    <div class="yt-section">
-      <h4>LLM Provider</h4>
+    <div class="yt-section collapsible" data-section="llm">
+      <h4 class="section-header" onclick="toggleSection('llm')">LLM Provider <span class="collapse-icon">▼</span></h4>
+      <div class="section-content">
       <div class="yt-controls">
         <select id="yt-provider">
           <option value="openai">OpenAI</option>
@@ -153,11 +156,13 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
         <label>ASCII Blocklist:</label>
         <input type="text" id="yt-blocklist" placeholder="Additional characters to avoid" style="width: 100%;">
       </div>
+      </div>
     </div>
 
     <!-- Style & Prompt Section -->
-    <div class="yt-section">
-      <h4>Style & Prompt</h4>
+    <div class="yt-section collapsible" data-section="style">
+      <h4 class="section-header" onclick="toggleSection('style')">Style & Prompt <span class="collapse-icon">▼</span></h4>
+      <div class="section-content">
       <div class="yt-controls">
         <select id="yt-style-preset">
           <option value="clean">Clean & Professional</option>
@@ -177,11 +182,13 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
         <button id="yt-stop-btn">Stop</button>
         <span id="yt-progress"></span>
       </div>
+      </div>
     </div>
 
     <!-- TTS Section -->
-    <div class="yt-section">
-      <h4>Text-to-Speech</h4>
+    <div class="yt-section collapsible" data-section="tts">
+      <h4 class="section-header" onclick="toggleSection('tts')">Text-to-Speech <span class="collapse-icon">▼</span></h4>
+      <div class="section-content">
       <div class="yt-controls">
         <label><input type="checkbox" id="yt-tts-enabled"> Enable TTS</label>
         <select id="yt-tts-provider">
@@ -221,16 +228,19 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
         <button id="yt-download-tts-btn" style="display: none;">Download Audio</button>
       </div>
       <audio id="yt-tts-audio" controls style="width: 100%; margin-top: 5px; display: none;"></audio>
+      </div>
     </div>
 
     <!-- Export Section -->
-    <div class="yt-section">
-      <h4>Export</h4>
+    <div class="yt-section collapsible" data-section="export">
+      <h4 class="section-header" onclick="toggleSection('export')">Export <span class="collapse-icon">▼</span></h4>
+      <div class="section-content">
       <div class="yt-controls">
         <button id="yt-export-txt-btn">Export TXT</button>
         <button id="yt-export-srt-btn">Export SRT</button>
         <button id="yt-export-vtt-btn">Export VTT</button>
         <button id="yt-export-json-btn">Export JSON</button>
+      </div>
       </div>
     </div>
 
@@ -252,6 +262,84 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
 
   // Append overlay to page
   document.body.appendChild(overlay);
+
+  // Global functions for UI interactions
+  window.toggleSection = (sectionName) => {
+    const section = document.querySelector(`[data-section="${sectionName}"]`);
+    const content = section.querySelector('.section-content');
+    const icon = section.querySelector('.collapse-icon');
+    
+    if (content.style.display === 'none') {
+      content.style.display = 'block';
+      icon.textContent = '▼';
+    } else {
+      content.style.display = 'none';
+      icon.textContent = '▶';
+    }
+  };
+
+  window.playSegmentTTS = async (segmentIndex, textType) => {
+    if (!transcriptData || segmentIndex < 0 || segmentIndex >= transcriptData.length) {
+      return;
+    }
+
+    const segment = transcriptData[segmentIndex];
+    let textToSpeak = '';
+    
+    if (textType === 'original') {
+      textToSpeak = segment.text || '';
+    } else if (textType === 'restyled') {
+      textToSpeak = segment.restyled || '';
+    }
+
+    if (!textToSpeak.trim()) {
+      return;
+    }
+
+    // Stop any currently playing TTS
+    const currentAudio = elements.ttsAudio;
+    if (currentAudio) {
+      currentAudio.pause();
+      currentAudio.currentTime = 0;
+    }
+
+    try {
+      // Get current TTS settings
+      const prefs = await getPrefs();
+      
+      if (!prefs.ttsEnabled) {
+        setStatus('TTS is not enabled. Enable it in the TTS section first.');
+        return;
+      }
+
+      // Send TTS request to background script
+      const response = await sendMessage('TTS_CALL', {
+        text: textToSpeak,
+        provider: prefs.ttsProvider,
+        voice: prefs.ttsVoice,
+        format: prefs.ttsFormat,
+        azureRegion: prefs.azureRegion,
+        rate: prefs.ttsRate
+      });
+
+      if (response.success && response.audioUrl) {
+        currentAudio.src = response.audioUrl;
+        currentAudio.play().catch(error => {
+          logError('Failed to play TTS audio:', error);
+          setStatus('Failed to play audio');
+        });
+        
+        // Show audio controls
+        currentAudio.style.display = 'block';
+        setStatus(`Playing ${textType} text for segment ${segmentIndex + 1}`);
+      } else {
+        setError(`TTS failed: ${response.error || 'Unknown error'}`);
+      }
+    } catch (error) {
+      logError('TTS request failed:', error);
+      setError('Failed to generate TTS audio');
+    }
+  };
 
   // Element references
   const elements = {
@@ -827,7 +915,7 @@ Context (next fragments):
     const index = findSegmentIndex(currentTime);
     if (index !== activeSegmentIndex) {
       activeSegmentIndex = index;
-      applyActiveHighlight(false);
+      applyActiveHighlight(true); // Enable auto-scroll
       if (index >= 0) {
         updateSubtitleText(transcriptData[index]);
       } else {
@@ -883,8 +971,14 @@ Context (next fragments):
       <div class="yt-transcript-item" data-index="${originalIndex}" data-start="${segment.start ?? 0}">
         <div class="yt-transcript-time">${timeStr}</div>
         <div class="yt-transcript-text">
-          <div class="yt-original">${escapeHtml(segment.text)}</div>
-          ${restyled ? `<div class="yt-restyled">${escapeHtml(restyled)}</div>` : ''}
+          <div class="yt-original">
+            <span class="yt-speaker-icon" title="Play original text" onclick="playSegmentTTS(${originalIndex}, 'original')">🔊</span>
+            ${escapeHtml(segment.text)}
+          </div>
+          ${restyled ? `<div class="yt-restyled">
+            <span class="yt-speaker-icon" title="Play restyled text" onclick="playSegmentTTS(${originalIndex}, 'restyled')">🔊</span>
+            ${escapeHtml(restyled)}
+          </div>` : ''}
         </div>
       </div>
     `;
