@@ -962,7 +962,7 @@ Context (next fragments):
       text: String(seg.text || '')
     }));
 
-    let template = `You are rewriting a full closed-caption transcript in a coherent way.
+    const systemPrompt = `You are rewriting a full closed-caption transcript in a coherent way.
 Style: ${style}
 Output language: ${outLang}
 
@@ -972,19 +972,20 @@ Constraints:
 - Do not invent content, speaker names, or change timing.
 - Return ONLY strict JSON with this exact shape and property names:
 { "segments": [ { "start": number, "end": number, "text": string }, ... ] }
-No markdown fences, no commentary.
+No markdown fences, no commentary.`;
 
-Input segments (JSON):\n` + JSON.stringify({ segments: minimal });
+    const jsonStr = JSON.stringify({ segments: minimal });
 
+    let userPrompt = `Input segments (JSON):\n${jsonStr}`;
     if (elements.asciiOnly.checked) {
-      template +=
+      userPrompt +=
         `\n\nIMPORTANT: Use only standard ASCII characters in your response. Avoid accented letters, special punctuation, or Unicode symbols.`;
       if (elements.blocklist.value.trim()) {
-        template += ` Also avoid these specific characters: ${elements.blocklist.value.trim()}`;
+        userPrompt += ` Also avoid these specific characters: ${elements.blocklist.value.trim()}`;
       }
     }
 
-    return template;
+    return { systemPrompt, userPrompt };
   }
 
   // Background messaging
@@ -1201,7 +1202,7 @@ Input segments (JSON):\n` + JSON.stringify({ segments: minimal });
       try {
         setStatus('Starting single-call restyle...');
 
-        const prompt = buildGlobalPrompt(transcriptData);
+        const { systemPrompt, userPrompt } = buildGlobalPrompt(transcriptData);
         aborter = new AbortController();
         activeBatchId = `restyle-one-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
@@ -1210,8 +1211,8 @@ Input segments (JSON):\n` + JSON.stringify({ segments: minimal });
           baseUrl: elements.baseUrl.value,
           apiKey: elements.apiKey.value,
           model: elements.model.value,
-          systemPrompt: '',
-          userPrompt: prompt,
+          systemPrompt,
+          userPrompt,
           asciiOnly: elements.asciiOnly.checked,
           batchId: activeBatchId,
           requestId: `${activeBatchId}:0`,
