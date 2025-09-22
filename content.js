@@ -83,7 +83,7 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
 
     <!-- Language Preferences Section -->
     <div class="yt-section collapsible" data-section="lang">
-      <h4 class="section-header" onclick="toggleSection('lang')">Language Preferences <span class="collapse-icon">▼</span></h4>
+      <h4 class="section-header">Language Preferences <span class="collapse-icon">▼</span></h4>
       <div class="section-content">
       <div class="yt-controls">
         <label>Preferred Languages (comma-separated):</label>
@@ -119,7 +119,7 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
 
     <!-- LLM Controls Section -->
     <div class="yt-section collapsible" data-section="llm">
-      <h4 class="section-header" onclick="toggleSection('llm')">LLM Provider <span class="collapse-icon">▼</span></h4>
+      <h4 class="section-header">LLM Provider <span class="collapse-icon">▼</span></h4>
       <div class="section-content">
       <div class="yt-controls">
         <select id="yt-provider">
@@ -161,7 +161,7 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
 
     <!-- Style & Prompt Section -->
     <div class="yt-section collapsible" data-section="style">
-      <h4 class="section-header" onclick="toggleSection('style')">Style & Prompt <span class="collapse-icon">▼</span></h4>
+      <h4 class="section-header">Style & Prompt <span class="collapse-icon">▼</span></h4>
       <div class="section-content">
       <div class="yt-controls">
         <select id="yt-style-preset">
@@ -187,7 +187,7 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
 
     <!-- TTS Section -->
     <div class="yt-section collapsible" data-section="tts">
-      <h4 class="section-header" onclick="toggleSection('tts')">Text-to-Speech <span class="collapse-icon">▼</span></h4>
+      <h4 class="section-header">Text-to-Speech <span class="collapse-icon">▼</span></h4>
       <div class="section-content">
       <div class="yt-controls">
         <label><input type="checkbox" id="yt-tts-enabled"> Enable TTS</label>
@@ -233,7 +233,7 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
 
     <!-- Export Section -->
     <div class="yt-section collapsible" data-section="export">
-      <h4 class="section-header" onclick="toggleSection('export')">Export <span class="collapse-icon">▼</span></h4>
+      <h4 class="section-header">Export <span class="collapse-icon">▼</span></h4>
       <div class="section-content">
       <div class="yt-controls">
         <button id="yt-export-txt-btn">Export TXT</button>
@@ -264,19 +264,6 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
   document.body.appendChild(overlay);
 
   // Global functions for UI interactions
-  window.toggleSection = (sectionName) => {
-    const section = document.querySelector(`[data-section="${sectionName}"]`);
-    const content = section.querySelector('.section-content');
-    const icon = section.querySelector('.collapse-icon');
-    
-    if (content.style.display === 'none') {
-      content.style.display = 'block';
-      icon.textContent = '▼';
-    } else {
-      content.style.display = 'none';
-      icon.textContent = '▶';
-    }
-  };
 
   window.playSegmentTTS = async (segmentIndex, textType) => {
     if (!transcriptData || segmentIndex < 0 || segmentIndex >= transcriptData.length) {
@@ -2163,6 +2150,23 @@ ${text}
     elements.fontSize.addEventListener('input', handleFontSizeChange);
     elements.fontSize.addEventListener('change', handleFontSizeChange);
   }
+
+  // Collapsible sections
+  document.querySelectorAll('.yt-section.collapsible .section-header').forEach(header => {
+    header.addEventListener('click', () => {
+      const section = header.closest('.yt-section');
+      const content = section.querySelector('.section-content');
+      const icon = header.querySelector('.collapse-icon');
+      
+      if (content.style.display === 'none') {
+        content.style.display = 'block';
+        icon.textContent = '▼';
+      } else {
+        content.style.display = 'none';
+        icon.textContent = '▶';
+      }
+    });
+  });
 
   elements.detectBtn.addEventListener('click', detectVideoId);
   elements.listTracksBtn.addEventListener('click', listTracks);
