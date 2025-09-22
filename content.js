@@ -261,6 +261,7 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
       </div>
       <div class="yt-controls">
         <label><input type="checkbox" id="yt-furigana"> Show furigana for Japanese text</label>
+        <label><input type="checkbox" id="yt-show-both"> Show both original and styled text over video</label>
       </div>
       <div id="yt-transcript-list" class="yt-transcript-list"></div>
     </div>
@@ -563,6 +564,7 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
     autoTts: document.getElementById('yt-auto-tts'),
     autoTtsType: document.getElementById('yt-auto-tts-type'),
     furigana: document.getElementById('yt-furigana'),
+    showBoth: document.getElementById('yt-show-both'),
     status: document.getElementById('yt-status')
   };
 
@@ -831,6 +833,7 @@ Context (next fragments):
 
           // Furigana settings
           setIf(elements.furigana, ytro_prefs.furigana, 'checked');
+    setIf(elements.showBoth, ytro_prefs.showBoth, 'checked');
 
           // TTS settings
           setIf(elements.ttsEnabled, ytro_prefs.ttsEnabled, 'checked');
@@ -898,6 +901,7 @@ Context (next fragments):
 
       // Furigana settings
       furigana: elements.furigana?.checked || false,
+    showBoth: elements.showBoth?.checked || false,
 
       // TTS settings
       ttsEnabled: elements.ttsEnabled.checked,
@@ -1027,13 +1031,27 @@ Context (next fragments):
     if (!overlay) return;
 
     if (segment && (segment.restyled || segment.text)) {
-      const textToShow = segment.restyled || segment.text || '';
+      const originalText = segment.text || '';
+      const restyledText = segment.restyled || '';
       
-      // Apply furigana if enabled
-      if (elements.furigana?.checked) {
-        overlay.innerHTML = generateFurigana(textToShow);
+      let textToShow = '';
+      
+      if (elements.showBoth?.checked && originalText && restyledText) {
+        // Show both original and restyled text
+        const displayOriginal = elements.furigana?.checked ? generateFurigana(originalText) : originalText;
+        const displayRestyled = elements.furigana?.checked ? generateFurigana(restyledText) : restyledText;
+        
+        textToShow = `<div class="subtitle-original">${displayOriginal}</div><div class="subtitle-restyled">${displayRestyled}</div>`;
+        overlay.innerHTML = textToShow;
       } else {
-        overlay.textContent = textToShow;
+        // Show only one text (prefer restyled if available)
+        textToShow = restyledText || originalText;
+        
+        if (elements.furigana?.checked) {
+          overlay.innerHTML = generateFurigana(textToShow);
+        } else {
+          overlay.textContent = textToShow;
+        }
       }
       
       overlay.style.display = textToShow ? 'block' : 'none';
@@ -1352,7 +1370,7 @@ Context (next fragments):
       '風景': 'ふうけい', '暗黒': 'あんこく', '激化': 'げきか', '激戦': 'げきせん',
       '耐性': 'たいせい', '聞こえる': 'きこえる', '聞き取る': 'ききとる', '道筋': 'みちすじ',
       '野心的': 'やしんてき', '野球': 'やきゅう', '驚異': 'きょうい', '驚嘆': 'きょうたん',
-      '悪魔': 'あくま', '悪化': 'あっか', '悪夢': 'あくむ', '悪影響': 'あくえいきょう'
+      '悪魔': 'あくま', '悪化': 'あっか', '悪夢': 'あくむ', '悪影響': 'あくえいきょう',
       
       // Additional common kanji for comprehensive coverage
       '会': 'かい', '場': 'ば', '所': 'しょ', '地': 'ち', '市': 'し', '県': 'けん', '州': 'しゅう',
@@ -2715,6 +2733,13 @@ ${text}
         renderTranscript(transcriptData);
       }
       setStatus(`Furigana ${elements.furigana.checked ? 'enabled' : 'disabled'}`);
+    });
+  }
+
+  if (elements.showBoth) {
+    elements.showBoth.addEventListener('change', () => {
+      savePrefs();
+      setStatus(`Show both texts ${elements.showBoth.checked ? 'enabled' : 'disabled'}`);
     });
   }
 

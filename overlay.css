@@ -386,6 +386,48 @@ button:disabled {
   transform: scale(1.1);
 }
 
+/* Furigana styling */
+ruby {
+  ruby-position: over;
+}
+
+rt {
+  font-size: 0.6em;
+  color: var(--yt-text-muted);
+  font-weight: normal;
+}
+
+/* Ensure proper spacing for furigana */
+.yt-transcript-text ruby {
+  margin: 0 1px;
+}
+
+/* Furigana in video overlay */
+#ts-video-subtitles ruby {
+  margin: 0 1px;
+}
+
+#ts-video-subtitles rt {
+  font-size: 0.5em;
+  color: rgba(255, 255, 255, 0.8);
+  font-weight: normal;
+}
+
+/* Dual subtitle display */
+.subtitle-original {
+  color: rgba(255, 255, 255, 0.7);
+  font-size: 0.9em;
+  margin-bottom: 4px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.3);
+  padding-bottom: 4px;
+}
+
+.subtitle-restyled {
+  color: rgba(255, 255, 255, 1);
+  font-size: 1em;
+  font-weight: 500;
+}
+
 .yt-original {
   color: var(--yt-text-secondary);
   margin-bottom: 4px;
