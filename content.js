@@ -264,8 +264,23 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
   document.body.appendChild(overlay);
 
   // Global functions for UI interactions
+  async function getPrefs() {
+    try {
+      const response = await sendMessage('GET_PREFS', {
+        keys: ['ytro_prefs']
+      });
+      
+      if (response.success && response.data.ytro_prefs) {
+        return response.data.ytro_prefs;
+      }
+      return {};
+    } catch (error) {
+      logError('Failed to get preferences:', error);
+      return {};
+    }
+  }
 
-  window.playSegmentTTS = async (segmentIndex, textType) => {
+  async function playSegmentTTS(segmentIndex, textType) {
     if (!transcriptData || segmentIndex < 0 || segmentIndex >= transcriptData.length) {
       return;
     }
@@ -299,18 +314,67 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
         return;
       }
 
-      // Send TTS request to background script
-      const response = await sendMessage('TTS_CALL', {
+      // Handle browser TTS directly in content script
+      if (prefs.ttsProvider === 'browser') {
+        // Use browser's built-in TTS
+        if ('speechSynthesis' in window) {
+          // Stop any current speech
+          window.speechSynthesis.cancel();
+          
+          const utterance = new SpeechSynthesisUtterance(textToSpeak);
+          
+          // Set voice if specified
+          if (prefs.ttsVoice) {
+            const voices = window.speechSynthesis.getVoices();
+            const selectedVoice = voices.find(v => v.name === prefs.ttsVoice || v.voiceURI === prefs.ttsVoice);
+            if (selectedVoice) {
+              utterance.voice = selectedVoice;
+            }
+          }
+          
+          // Set rate
+          utterance.rate = prefs.ttsRate || 1.0;
+          utterance.pitch = 1.0;
+          utterance.volume = 1.0;
+          
+          // Play the speech
+          window.speechSynthesis.speak(utterance);
+          
+          setStatus(`Playing ${textType} text for segment ${segmentIndex + 1} (browser TTS)`);
+          return;
+        } else {
+          setError('Browser TTS not supported in this environment');
+          return;
+        }
+      }
+
+      // Send TTS request to background script for other providers
+      const response = await sendMessage('TTS_SPEAK', {
         text: textToSpeak,
         provider: prefs.ttsProvider,
         voice: prefs.ttsVoice,
         format: prefs.ttsFormat,
         azureRegion: prefs.azureRegion,
+        baseUrl: prefs.baseUrl,
+        apiKey: prefs.apiKey,
         rate: prefs.ttsRate
       });
 
-      if (response.success && response.audioUrl) {
-        currentAudio.src = response.audioUrl;
+      if (response.success && response.data && response.data.audioData) {
+        // Convert base64 audio data to blob URL
+        const audioData = response.data.audioData;
+        const mimeType = response.data.mime || 'audio/mpeg';
+        
+        // Convert base64 to blob
+        const binaryString = atob(audioData);
+        const bytes = new Uint8Array(binaryString.length);
+        for (let i = 0; i < binaryString.length; i++) {
+          bytes[i] = binaryString.charCodeAt(i);
+        }
+        const blob = new Blob([bytes], { type: mimeType });
+        const audioUrl = URL.createObjectURL(blob);
+        
+        currentAudio.src = audioUrl;
         currentAudio.play().catch(error => {
           logError('Failed to play TTS audio:', error);
           setStatus('Failed to play audio');
@@ -319,6 +383,11 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
         // Show audio controls
         currentAudio.style.display = 'block';
         setStatus(`Playing ${textType} text for segment ${segmentIndex + 1}`);
+        
+        // Clean up the blob URL when audio ends
+        currentAudio.addEventListener('ended', () => {
+          URL.revokeObjectURL(audioUrl);
+        }, { once: true });
       } else {
         setError(`TTS failed: ${response.error || 'Unknown error'}`);
       }
@@ -959,11 +1028,11 @@ Context (next fragments):
         <div class="yt-transcript-time">${timeStr}</div>
         <div class="yt-transcript-text">
           <div class="yt-original">
-            <span class="yt-speaker-icon" title="Play original text" onclick="playSegmentTTS(${originalIndex}, 'original')">🔊</span>
+            <span class="yt-speaker-icon" title="Play original text" data-segment-index="${originalIndex}" data-text-type="original">🔊</span>
             ${escapeHtml(segment.text)}
           </div>
           ${restyled ? `<div class="yt-restyled">
-            <span class="yt-speaker-icon" title="Play restyled text" onclick="playSegmentTTS(${originalIndex}, 'restyled')">🔊</span>
+            <span class="yt-speaker-icon" title="Play restyled text" data-segment-index="${originalIndex}" data-text-type="restyled">🔊</span>
             ${escapeHtml(restyled)}
           </div>` : ''}
         </div>
@@ -971,6 +1040,16 @@ Context (next fragments):
     `;
       })
       .join('');
+    
+    // Add event listeners for speaker icons
+    elements.transcriptList.querySelectorAll('.yt-speaker-icon').forEach(icon => {
+      icon.addEventListener('click', () => {
+        const segmentIndex = parseInt(icon.dataset.segmentIndex, 10);
+        const textType = icon.dataset.textType;
+        playSegmentTTS(segmentIndex, textType);
+      });
+    });
+    
     applyActiveHighlight();
     applyActiveHighlight(false);
   }
