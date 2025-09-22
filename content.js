@@ -18,6 +18,13 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
   let activeTtsRequestId = null;
   let activeTtsBatchId = null;
   let browserTtsActive = false;
+  let autoTtsInterruptGuardEnabled = false;
+  const autoTtsGuardState = {
+    token: null,
+    segmentIndex: -1,
+    isActive: false,
+    videoPausedForGuard: false
+  };
 
   const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -260,6 +267,9 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
         </select>
       </div>
       <div class="yt-controls">
+        <button id="yt-auto-tts-guard-btn" type="button">Enable minimal video pausing</button>
+      </div>
+      <div class="yt-controls">
         <label><input type="checkbox" id="yt-furigana"> Show furigana for Japanese text</label>
         <label><input type="checkbox" id="yt-show-both"> Show both original and styled text over video</label>
       </div>
@@ -317,8 +327,12 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
     // Stop any currently playing TTS
     const currentAudio = elements.ttsAudio;
     if (currentAudio) {
-      currentAudio.pause();
-      currentAudio.currentTime = 0;
+      try {
+        currentAudio.pause();
+        currentAudio.currentTime = 0;
+      } catch (_) {
+        /* ignore pause errors */
+      }
     }
 
     try {
@@ -338,79 +352,89 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
 
       // Handle browser TTS directly in content script
       if (prefs.ttsProvider === 'browser') {
-        // Use browser's built-in TTS
-        if ('speechSynthesis' in window) {
-          // Stop any current speech
-          window.speechSynthesis.cancel();
-          
-          // Ensure text is properly encoded for Unicode
-          const cleanText = textToSpeak.trim();
-          if (!cleanText) {
-            setStatus('No text to speak');
-            return;
-          }
-          
-          log(`Browser TTS: Speaking text (${cleanText.length} chars): "${cleanText.substring(0, 50)}${cleanText.length > 50 ? '...' : ''}"`);
-          
+        if (!('speechSynthesis' in window)) {
+          setError('Browser TTS not supported in this environment');
+          return;
+        }
+
+        const cleanText = textToSpeak.trim();
+        if (!cleanText) {
+          setStatus('No text to speak');
+          return;
+        }
+
+        log(
+          `Browser TTS: Speaking text (${cleanText.length} chars): "${cleanText.substring(0, 50)}${
+            cleanText.length > 50 ? '...' : ''
+          }"`
+        );
+
+        if (browserTtsActive || window.speechSynthesis.speaking) {
+          log('Browser TTS already speaking; queuing next utterance');
+        }
+
+        return new Promise(resolve => {
+          const finish = () => {
+            browserTtsActive = false;
+            updateStopButtonVisibility();
+            resolve();
+          };
+
           const utterance = new SpeechSynthesisUtterance(cleanText);
-          
-          // Set language and voice with better Unicode support
+
           const voices = window.speechSynthesis.getVoices();
           let selectedVoice = null;
-          
+
           if (prefs.ttsVoice) {
-            // Try exact match first
             selectedVoice = voices.find(v => v.name === prefs.ttsVoice || v.voiceURI === prefs.ttsVoice);
-            
-            // If no exact match, try partial match for language
+
             if (!selectedVoice) {
               const languageCode = prefs.ttsVoice.toLowerCase();
-              selectedVoice = voices.find(v => 
-                v.lang.toLowerCase().includes(languageCode) || 
-                v.name.toLowerCase().includes(languageCode)
+              selectedVoice = voices.find(
+                v => v.lang.toLowerCase().includes(languageCode) || v.name.toLowerCase().includes(languageCode)
               );
             }
           }
-          
-          // Auto-detect language if no voice specified or found
+
           if (!selectedVoice) {
-            // Try to detect Japanese characters
             if (/[\u3040-\u309f\u30a0-\u30ff\u4e00-\u9faf]/.test(cleanText)) {
-              selectedVoice = voices.find(v => v.lang.toLowerCase().includes('ja') || v.lang.toLowerCase().includes('japanese'));
+              selectedVoice = voices.find(
+                v => v.lang.toLowerCase().includes('ja') || v.lang.toLowerCase().includes('japanese')
+              );
               if (selectedVoice) {
                 log(`Auto-selected Japanese voice: ${selectedVoice.name}`);
               }
-            }
-            // Try to detect Chinese characters
-            else if (/[\u4e00-\u9fff]/.test(cleanText)) {
-              selectedVoice = voices.find(v => v.lang.toLowerCase().includes('zh') || v.lang.toLowerCase().includes('chinese'));
+            } else if (/[\u4e00-\u9fff]/.test(cleanText)) {
+              selectedVoice = voices.find(
+                v => v.lang.toLowerCase().includes('zh') || v.lang.toLowerCase().includes('chinese')
+              );
               if (selectedVoice) {
                 log(`Auto-selected Chinese voice: ${selectedVoice.name}`);
               }
-            }
-            // Try to detect Korean characters
-            else if (/[\uac00-\ud7af\u1100-\u11ff\u3130-\u318f]/.test(cleanText)) {
-              selectedVoice = voices.find(v => v.lang.toLowerCase().includes('ko') || v.lang.toLowerCase().includes('korean'));
+            } else if (/[\uac00-\ud7af\u1100-\u11ff\u3130-\u318f]/.test(cleanText)) {
+              selectedVoice = voices.find(
+                v => v.lang.toLowerCase().includes('ko') || v.lang.toLowerCase().includes('korean')
+              );
               if (selectedVoice) {
                 log(`Auto-selected Korean voice: ${selectedVoice.name}`);
               }
-            }
-            // Try to detect Arabic characters
-            else if (/[\u0600-\u06ff]/.test(cleanText)) {
-              selectedVoice = voices.find(v => v.lang.toLowerCase().includes('ar') || v.lang.toLowerCase().includes('arabic'));
+            } else if (/[\u0600-\u06ff]/.test(cleanText)) {
+              selectedVoice = voices.find(
+                v => v.lang.toLowerCase().includes('ar') || v.lang.toLowerCase().includes('arabic')
+              );
               if (selectedVoice) {
                 log(`Auto-selected Arabic voice: ${selectedVoice.name}`);
               }
-            }
-            // Try to detect Cyrillic characters
-            else if (/[\u0400-\u04ff]/.test(cleanText)) {
-              selectedVoice = voices.find(v => v.lang.toLowerCase().includes('ru') || v.lang.toLowerCase().includes('russian'));
+            } else if (/[\u0400-\u04ff]/.test(cleanText)) {
+              selectedVoice = voices.find(
+                v => v.lang.toLowerCase().includes('ru') || v.lang.toLowerCase().includes('russian')
+              );
               if (selectedVoice) {
                 log(`Auto-selected Russian voice: ${selectedVoice.name}`);
               }
             }
           }
-          
+
           if (selectedVoice) {
             utterance.voice = selectedVoice;
             utterance.lang = selectedVoice.lang;
@@ -418,33 +442,37 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
           } else {
             log('No specific voice found, using default');
           }
-          
-          // Set rate
+
           utterance.rate = prefs.ttsRate || 1.0;
           utterance.pitch = 1.0;
           utterance.volume = 1.0;
-          
-          // Add error handling
-          utterance.onerror = (event) => {
-            logError('Browser TTS error:', event.error);
-            setError(`TTS error: ${event.error}`);
+
+          utterance.onstart = () => {
+            browserTtsActive = true;
+            updateStopButtonVisibility();
           };
-          
+
           utterance.onend = () => {
             log('Browser TTS completed');
+            finish();
           };
-          
-          // Play the speech
-          window.speechSynthesis.speak(utterance);
-          
-          setStatus(`Playing ${textType} text for segment ${segmentIndex + 1} (browser TTS)`);
-          return;
-        } else {
-          setError('Browser TTS not supported in this environment');
-          return;
-        }
-      }
 
+          utterance.onerror = event => {
+            logError('Browser TTS error:', event.error);
+            setError(`TTS error: ${event.error}`);
+            finish();
+          };
+
+          try {
+            window.speechSynthesis.speak(utterance);
+            setStatus(`Playing ${textType} text for segment ${segmentIndex + 1} (browser TTS)`);
+          } catch (error) {
+            logError('Failed to queue browser TTS:', error);
+            setError('Failed to start browser TTS');
+            finish();
+          }
+        });
+      }
       // Send TTS request to background script for other providers
       const response = await sendMessage('TTS_SPEAK', {
         text: textToSpeak,
@@ -458,33 +486,66 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
       });
 
       if (response.success && response.data && response.data.audioData) {
-        // Convert base64 audio data to blob URL
+        if (!currentAudio) {
+          setError('No audio element available for TTS playback');
+          return;
+        }
+
         const audioData = response.data.audioData;
         const mimeType = response.data.mime || 'audio/mpeg';
-        
-        // Convert base64 to blob
         const binaryString = atob(audioData);
         const bytes = new Uint8Array(binaryString.length);
-        for (let i = 0; i < binaryString.length; i++) {
+        for (let i = 0; i < binaryString.length; i += 1) {
           bytes[i] = binaryString.charCodeAt(i);
         }
         const blob = new Blob([bytes], { type: mimeType });
         const audioUrl = URL.createObjectURL(blob);
-        
+
         currentAudio.src = audioUrl;
-        currentAudio.play().catch(error => {
-          logError('Failed to play TTS audio:', error);
-          setStatus('Failed to play audio');
-        });
-        
-        // Show audio controls
         currentAudio.style.display = 'block';
         setStatus(`Playing ${textType} text for segment ${segmentIndex + 1}`);
-        
-        // Clean up the blob URL when audio ends
-        currentAudio.addEventListener('ended', () => {
-          URL.revokeObjectURL(audioUrl);
-        }, { once: true });
+
+        await new Promise(resolve => {
+          let resolved = false;
+
+          const cleanup = () => {
+            if (resolved) return;
+            resolved = true;
+            currentAudio.removeEventListener('ended', onEnded);
+            currentAudio.removeEventListener('error', onError);
+            currentAudio.removeEventListener('pause', onPause);
+            URL.revokeObjectURL(audioUrl);
+            resolve();
+          };
+
+          const onEnded = () => {
+            cleanup();
+          };
+
+          const onError = event => {
+            logError('Failed to play TTS audio:', event?.error || event);
+            setStatus('Failed to play audio');
+            cleanup();
+          };
+
+          const onPause = () => {
+            if (!currentAudio.paused) {
+              return;
+            }
+            if (currentAudio.ended || currentAudio.currentTime === 0 || !currentAudio.src) {
+              cleanup();
+            }
+          };
+
+          currentAudio.addEventListener('ended', onEnded, { once: true });
+          currentAudio.addEventListener('error', onError, { once: true });
+          currentAudio.addEventListener('pause', onPause, { once: true });
+
+          const playPromise = currentAudio.play();
+          if (playPromise && typeof playPromise.catch === 'function') {
+            playPromise.catch(onError);
+          }
+        });
       } else {
         setError(`TTS failed: ${response.error || 'Unknown error'}`);
       }
@@ -563,10 +624,13 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
     transcriptList: document.getElementById('yt-transcript-list'),
     autoTts: document.getElementById('yt-auto-tts'),
     autoTtsType: document.getElementById('yt-auto-tts-type'),
+    autoTtsGuardBtn: document.getElementById('yt-auto-tts-guard-btn'),
     furigana: document.getElementById('yt-furigana'),
     showBoth: document.getElementById('yt-show-both'),
     status: document.getElementById('yt-status')
   };
+
+  syncAutoTtsGuardUi();
 
   // Default values
   const DEFAULT_PROMPT = `Restyle this closed-caption sentence fragment in {{style}} style. Output language: {{outlang}}. This input is a partial sentence from on-screen captions. Keep the meaning intact but improve clarity and readability for captions. Keep sentence pacing etc. Just change verbiage and vibe. It will play alongside the youtube vid in CCs. Do not include timestamps, time ranges, or any numerals that are part of time markers; ignore them entirely. Do not add speaker names or extra content. If ASCII-only mode is enabled, use only standard ASCII characters (no accents, special punctuation, or Unicode symbols).
@@ -830,6 +894,8 @@ Context (next fragments):
           setIf(elements.autoTts, ytro_prefs.autoTts, 'checked');
           setIf(elements.autoTtsType, ytro_prefs.autoTtsType);
           autoTtsEnabled = elements.autoTts?.checked || false;
+          autoTtsInterruptGuardEnabled = Boolean(ytro_prefs.autoTtsGuard);
+          syncAutoTtsGuardUi();
 
           // Furigana settings
           setIf(elements.furigana, ytro_prefs.furigana, 'checked');
@@ -898,6 +964,7 @@ Context (next fragments):
       // Auto-TTS settings
       autoTts: elements.autoTts?.checked || false,
       autoTtsType: elements.autoTtsType?.value || 'original',
+      autoTtsGuard: autoTtsInterruptGuardEnabled,
 
       // Furigana settings
       furigana: elements.furigana?.checked || false,
@@ -1065,11 +1132,45 @@ Context (next fragments):
     return document.querySelector('video');
   }
 
+  function resumeGuardedVideo() {
+    if (!autoTtsGuardState.videoPausedForGuard) {
+      return;
+    }
+
+    const video = getVideoElement();
+    if (video) {
+      video.play().catch(() => {
+        /* ignore autoplay block */
+      });
+    }
+
+    autoTtsGuardState.videoPausedForGuard = false;
+  }
+
+  function resetAutoTtsGuardState() {
+    autoTtsGuardState.token = null;
+    autoTtsGuardState.segmentIndex = -1;
+    autoTtsGuardState.isActive = false;
+    autoTtsGuardState.videoPausedForGuard = false;
+  }
+
+  function releaseAutoTtsGuard({ resumeVideo = false } = {}) {
+    if (resumeVideo) {
+      resumeGuardedVideo();
+    } else {
+      autoTtsGuardState.videoPausedForGuard = false;
+    }
+
+    resetAutoTtsGuardState();
+  }
+
   function ensureVideoListeners() {
     const video = getVideoElement();
     if (!video || videoListenerAttached) return;
     video.addEventListener('timeupdate', () => {
-      updateActiveSegment(video.currentTime || 0);
+      updateActiveSegment(video.currentTime || 0).catch(error => {
+        logError('Failed to update active segment:', error);
+      });
     });
     video.addEventListener('emptied', () => {
       resetSubtitleState();
@@ -1080,6 +1181,7 @@ Context (next fragments):
   function resetSubtitleState() {
     activeSegmentIndex = -1;
     lastAutoTtsSegment = -1; // Reset auto-TTS tracking
+    releaseAutoTtsGuard({ resumeVideo: true });
     updateSubtitleText(null);
     applyActiveHighlight(false);
   }
@@ -1103,24 +1205,63 @@ Context (next fragments):
       : -1;
   }
 
-  function updateActiveSegment(currentTime) {
+  async function updateActiveSegment(currentTime) {
     if (!transcriptData.length) {
       resetSubtitleState();
       return;
     }
 
     const index = findSegmentIndex(currentTime);
+
+    if (
+      autoTtsInterruptGuardEnabled &&
+      autoTtsGuardState.isActive &&
+      autoTtsGuardState.segmentIndex !== -1 &&
+      index !== autoTtsGuardState.segmentIndex &&
+      autoTtsGuardState.token
+    ) {
+      const video = getVideoElement();
+      if (video && !video.paused && !video.ended) {
+        try {
+          video.pause();
+          autoTtsGuardState.videoPausedForGuard = true;
+        } catch (error) {
+          logError('Failed to pause video while waiting for auto TTS:', error);
+        }
+      }
+      return;
+    }
+
     if (index !== activeSegmentIndex) {
       activeSegmentIndex = index;
       applyActiveHighlight(true); // Enable auto-scroll
       if (index >= 0) {
         updateSubtitleText(transcriptData[index]);
-        
+
         // Auto-play TTS if enabled and this is a new segment
         if (autoTtsEnabled && index !== lastAutoTtsSegment && index < transcriptData.length) {
           lastAutoTtsSegment = index;
           const textType = elements.autoTtsType?.value || 'original';
-          playSegmentTTS(index, textType);
+
+          const playbackPromise = Promise.resolve().then(() => playSegmentTTS(index, textType));
+
+          playbackPromise.catch(error => {
+            logError('Auto TTS playback failed:', error);
+          });
+
+          if (autoTtsInterruptGuardEnabled) {
+            const guardToken = Symbol('auto-tts-guard');
+            autoTtsGuardState.token = guardToken;
+            autoTtsGuardState.segmentIndex = index;
+            autoTtsGuardState.isActive = true;
+            autoTtsGuardState.videoPausedForGuard = false;
+
+            playbackPromise.finally(() => {
+              if (autoTtsGuardState.token === guardToken) {
+                releaseAutoTtsGuard({ resumeVideo: true });
+              }
+            });
+          }
         }
       } else {
         updateSubtitleText(null);
@@ -2148,6 +2289,16 @@ No markdown fences, no commentary.`;
     }
   }
 
+  function syncAutoTtsGuardUi() {
+    if (!elements.autoTtsGuardBtn) return;
+
+    elements.autoTtsGuardBtn.textContent = autoTtsInterruptGuardEnabled
+      ? 'Disable minimal video pausing'
+      : 'Enable minimal video pausing';
+    elements.autoTtsGuardBtn.classList.toggle('active', autoTtsInterruptGuardEnabled);
+    elements.autoTtsGuardBtn.setAttribute('aria-pressed', autoTtsInterruptGuardEnabled ? 'true' : 'false');
+  }
+
   function showStopButton(show) {
     if (!elements.stopTtsBtn) return;
     elements.stopTtsBtn.style.display = show ? 'inline-block' : 'none';
@@ -2504,6 +2655,8 @@ No markdown fences, no commentary.`;
         /* ignore */
       }
 
+      releaseAutoTtsGuard({ resumeVideo: true });
+
       // Abort background request if present
       if (activeTtsRequestId || activeTtsBatchId) {
         await sendMessage('ABORT_REQUESTS', {
@@ -2714,6 +2867,9 @@ ${text}
     elements.autoTts.addEventListener('change', () => {
       autoTtsEnabled = elements.autoTts.checked;
       lastAutoTtsSegment = -1; // Reset to allow replay of current segment
+      if (!autoTtsEnabled) {
+        releaseAutoTtsGuard({ resumeVideo: true });
+      }
       savePrefs();
       setStatus(`Auto-TTS ${autoTtsEnabled ? 'enabled' : 'disabled'}`);
     });
@@ -2722,6 +2878,20 @@ ${text}
   if (elements.autoTtsType) {
     elements.autoTtsType.addEventListener('change', () => {
       savePrefs();
+    });
+  }
+
+  if (elements.autoTtsGuardBtn) {
+    elements.autoTtsGuardBtn.addEventListener('click', () => {
+      autoTtsInterruptGuardEnabled = !autoTtsInterruptGuardEnabled;
+      if (!autoTtsInterruptGuardEnabled) {
+        releaseAutoTtsGuard({ resumeVideo: true });
+      }
+      syncAutoTtsGuardUi();
+      savePrefs();
+      setStatus(
+        `Minimal auto-TTS pausing ${autoTtsInterruptGuardEnabled ? 'enabled' : 'disabled'}`
+      );
     });
   }
 
