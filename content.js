@@ -303,7 +303,10 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
       textToSpeak = segment.restyled || '';
     }
 
+    log(`TTS input - segment ${segmentIndex}, type: ${textType}, text: "${textToSpeak}"`);
+
     if (!textToSpeak.trim()) {
+      setStatus('No text content to speak');
       return;
     }
 
@@ -323,6 +326,12 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
         return;
       }
 
+      // Check for ASCII-only mode with non-ASCII text
+      if (prefs.asciiOnly && /[^\x00-\x7F]/.test(textToSpeak)) {
+        setStatus('Warning: ASCII-only mode is enabled but text contains Unicode characters. TTS may not work properly.');
+        log('ASCII-only mode warning: Text contains non-ASCII characters:', textToSpeak);
+      }
+
       // Handle browser TTS directly in content script
       if (prefs.ttsProvider === 'browser') {
         // Use browser's built-in TTS
@@ -330,21 +339,96 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
           // Stop any current speech
           window.speechSynthesis.cancel();
           
-          const utterance = new SpeechSynthesisUtterance(textToSpeak);
+          // Ensure text is properly encoded for Unicode
+          const cleanText = textToSpeak.trim();
+          if (!cleanText) {
+            setStatus('No text to speak');
+            return;
+          }
           
-          // Set voice if specified
+          log(`Browser TTS: Speaking text (${cleanText.length} chars): "${cleanText.substring(0, 50)}${cleanText.length > 50 ? '...' : ''}"`);
+          
+          const utterance = new SpeechSynthesisUtterance(cleanText);
+          
+          // Set language and voice with better Unicode support
+          const voices = window.speechSynthesis.getVoices();
+          let selectedVoice = null;
+          
           if (prefs.ttsVoice) {
-            const voices = window.speechSynthesis.getVoices();
-            const selectedVoice = voices.find(v => v.name === prefs.ttsVoice || v.voiceURI === prefs.ttsVoice);
-            if (selectedVoice) {
-              utterance.voice = selectedVoice;
+            // Try exact match first
+            selectedVoice = voices.find(v => v.name === prefs.ttsVoice || v.voiceURI === prefs.ttsVoice);
+            
+            // If no exact match, try partial match for language
+            if (!selectedVoice) {
+              const languageCode = prefs.ttsVoice.toLowerCase();
+              selectedVoice = voices.find(v => 
+                v.lang.toLowerCase().includes(languageCode) || 
+                v.name.toLowerCase().includes(languageCode)
+              );
             }
+          }
+          
+          // Auto-detect language if no voice specified or found
+          if (!selectedVoice) {
+            // Try to detect Japanese characters
+            if (/[\u3040-\u309f\u30a0-\u30ff\u4e00-\u9faf]/.test(cleanText)) {
+              selectedVoice = voices.find(v => v.lang.toLowerCase().includes('ja') || v.lang.toLowerCase().includes('japanese'));
+              if (selectedVoice) {
+                log(`Auto-selected Japanese voice: ${selectedVoice.name}`);
+              }
+            }
+            // Try to detect Chinese characters
+            else if (/[\u4e00-\u9fff]/.test(cleanText)) {
+              selectedVoice = voices.find(v => v.lang.toLowerCase().includes('zh') || v.lang.toLowerCase().includes('chinese'));
+              if (selectedVoice) {
+                log(`Auto-selected Chinese voice: ${selectedVoice.name}`);
+              }
+            }
+            // Try to detect Korean characters
+            else if (/[\uac00-\ud7af\u1100-\u11ff\u3130-\u318f]/.test(cleanText)) {
+              selectedVoice = voices.find(v => v.lang.toLowerCase().includes('ko') || v.lang.toLowerCase().includes('korean'));
+              if (selectedVoice) {
+                log(`Auto-selected Korean voice: ${selectedVoice.name}`);
+              }
+            }
+            // Try to detect Arabic characters
+            else if (/[\u0600-\u06ff]/.test(cleanText)) {
+              selectedVoice = voices.find(v => v.lang.toLowerCase().includes('ar') || v.lang.toLowerCase().includes('arabic'));
+              if (selectedVoice) {
+                log(`Auto-selected Arabic voice: ${selectedVoice.name}`);
+              }
+            }
+            // Try to detect Cyrillic characters
+            else if (/[\u0400-\u04ff]/.test(cleanText)) {
+              selectedVoice = voices.find(v => v.lang.toLowerCase().includes('ru') || v.lang.toLowerCase().includes('russian'));
+              if (selectedVoice) {
+                log(`Auto-selected Russian voice: ${selectedVoice.name}`);
+              }
+            }
+          }
+          
+          if (selectedVoice) {
+            utterance.voice = selectedVoice;
+            utterance.lang = selectedVoice.lang;
+            log(`Using voice: ${selectedVoice.name} (${selectedVoice.lang})`);
+          } else {
+            log('No specific voice found, using default');
           }
           
           // Set rate
           utterance.rate = prefs.ttsRate || 1.0;
           utterance.pitch = 1.0;
           utterance.volume = 1.0;
+          
+          // Add error handling
+          utterance.onerror = (event) => {
+            logError('Browser TTS error:', event.error);
+            setError(`TTS error: ${event.error}`);
+          };
+          
+          utterance.onend = () => {
+            log('Browser TTS completed');
+          };
           
           // Play the speech
           window.speechSynthesis.speak(utterance);
