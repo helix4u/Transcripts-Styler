@@ -76,7 +76,6 @@ npm install
   pip install -r requirements.txt
   uvicorn main:app --host 127.0.0.1 --port 17653 --workers 1
   ```
-- Open `yt-transcript-local/index.html` (or https://yt.promptinject.me) to verify the API is reachable via the helper UI.
 
 ## Usage Walkthrough
 
