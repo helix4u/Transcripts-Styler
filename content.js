@@ -13,6 +13,8 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
   let activeSegmentIndex = -1;
   let videoListenerAttached = false;
   let subtitleOverlayEl = null;
+  let autoTtsEnabled = false;
+  let lastAutoTtsSegment = -1;
   let activeTtsRequestId = null;
   let activeTtsBatchId = null;
   let browserTtsActive = false;
@@ -250,6 +252,13 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
       <div class="yt-controls">
         <input type="text" id="yt-search-input" placeholder="Search transcript..." style="width: 100%;">
       </div>
+      <div class="yt-controls">
+        <label><input type="checkbox" id="yt-auto-tts"> Auto-play TTS with video timing</label>
+        <select id="yt-auto-tts-type" style="margin-left: 10px;">
+          <option value="original">Original text</option>
+          <option value="restyled">Restyled text</option>
+        </select>
+      </div>
       <div id="yt-transcript-list" class="yt-transcript-list"></div>
     </div>
 
@@ -464,6 +473,8 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
 
     searchInput: document.getElementById('yt-search-input'),
     transcriptList: document.getElementById('yt-transcript-list'),
+    autoTts: document.getElementById('yt-auto-tts'),
+    autoTtsType: document.getElementById('yt-auto-tts-type'),
     status: document.getElementById('yt-status')
   };
 
@@ -725,6 +736,11 @@ Context (next fragments):
           setIf(elements.temperature, ytro_prefs.temperature);
           setIf(elements.styleText, ytro_prefs.styleText);
 
+          // Auto-TTS settings
+          setIf(elements.autoTts, ytro_prefs.autoTts, 'checked');
+          setIf(elements.autoTtsType, ytro_prefs.autoTtsType);
+          autoTtsEnabled = elements.autoTts?.checked || false;
+
           // TTS settings
           setIf(elements.ttsEnabled, ytro_prefs.ttsEnabled, 'checked');
           setIf(elements.ttsProvider, ytro_prefs.ttsProvider);
@@ -784,6 +800,10 @@ Context (next fragments):
       maxTokens: parseInt(elements.maxTokens?.value, 10) || 1000,
       temperature: parseFloat(elements.temperature?.value) || 0.7,
       styleText: elements.styleText?.value || '',
+
+      // Auto-TTS settings
+      autoTts: elements.autoTts?.checked || false,
+      autoTtsType: elements.autoTtsType?.value || 'original',
 
       // TTS settings
       ttsEnabled: elements.ttsEnabled.checked,
@@ -939,6 +959,7 @@ Context (next fragments):
 
   function resetSubtitleState() {
     activeSegmentIndex = -1;
+    lastAutoTtsSegment = -1; // Reset auto-TTS tracking
     updateSubtitleText(null);
     applyActiveHighlight(false);
   }
@@ -974,6 +995,13 @@ Context (next fragments):
       applyActiveHighlight(true); // Enable auto-scroll
       if (index >= 0) {
         updateSubtitleText(transcriptData[index]);
+        
+        // Auto-play TTS if enabled and this is a new segment
+        if (autoTtsEnabled && index !== lastAutoTtsSegment && index < transcriptData.length) {
+          lastAutoTtsSegment = index;
+          const textType = elements.autoTtsType?.value || 'original';
+          playSegmentTTS(index, textType);
+        }
       } else {
         updateSubtitleText(null);
       }
@@ -2246,6 +2274,22 @@ ${text}
       }
     });
   });
+
+  // Auto-TTS controls
+  if (elements.autoTts) {
+    elements.autoTts.addEventListener('change', () => {
+      autoTtsEnabled = elements.autoTts.checked;
+      lastAutoTtsSegment = -1; // Reset to allow replay of current segment
+      savePrefs();
+      setStatus(`Auto-TTS ${autoTtsEnabled ? 'enabled' : 'disabled'}`);
+    });
+  }
+
+  if (elements.autoTtsType) {
+    elements.autoTtsType.addEventListener('change', () => {
+      savePrefs();
+    });
+  }
 
   elements.detectBtn.addEventListener('click', detectVideoId);
   elements.listTracksBtn.addEventListener('click', listTracks);
