@@ -6,8 +6,11 @@ Transcript Styler is a Manifest V3 Chrome extension that extracts YouTube captio
 - Captions retrieved exclusively through the bundled FastAPI helper (`yt-transcript-local`), which resolves tracks and returns timestamped segments for the UI overlay.
 - In-page overlay for detecting the current video, listing caption tracks, fetching transcripts, and previewing both original and AI-restyled text.
 - Prompt-driven LLM restyling pipeline with configurable provider (OpenAI, Anthropic, OpenAI-compatible), base URL override, model name, concurrency, ASCII-only enforcement, and reusable style presets.
+- Single-call restyling automatically chunks transcripts into sub-two-minute groups so LLM prompts stay focused and predictable.
 - Transcript workspace with search, active segment highlighting synced to playback, click-to-seek support, preset management, and an injected subtitle overlay on top of the YouTube player.
+- Dockable overlay with a one-click toggle: float it anywhere, snap it into the native transcript panel, and persist both the overlay position and subtitle vertical offset slider per user prefs.
 - Multi-provider TTS support (OpenAI, OpenAI-compatible, Azure, Kokoro, and on-device browser SpeechSynthesis), including Azure voice discovery and download-ready audio blobs.
+- Adjustable auto-TTS guard slider that keeps the video playing with only minimal pauses while generated audio catches up.
 - One-click exports for TXT, SRT, VTT, and JSON that include both the original and restyled text as applicable.
 - Persistent preferences stored in `chrome.storage.local` (`ytro_*` keys) with explicit `savePrefs()` calls wired to every control.
 - Debug logging toggle that surfaces `[TS-UI]` and `[TS-BG]` traces alongside service worker logs in `chrome://extensions/?errors=...`.
@@ -83,24 +86,26 @@ Start the `yt-transcript-local` server before opening YouTube so transcript call
 
 1. Navigate to a YouTube video with captions. The overlay appears in the top-left corner.
 2. Click **Detect** to populate the video ID, then **List Tracks**. The UI merges results from the service worker, timedtext endpoints, and the parsed player JSON, sorted by your language preferences.
-3. Select a caption track and click **Fetch Transcript**. Transcripts are fetched via `(a)` the local FastAPI helper if reachable, `(b)` the `yt.promptinject.me` scraper, or `(c)` timedtext/player endpoints. Text is parsed into segments and rendered in the transcript workspace.
-4. Configure restyling:
+3. Use the ⇲/⇱ dock toggle to snap the overlay into the native transcript panel or pop it back out. Drag or resize the floating panel as needed, and adjust the **Subtitle position** slider to move on-video captions. These preferences persist via `savePrefs()`.
+4. Select a caption track and click **Fetch Transcript**. Transcripts are fetched via `(a)` the local FastAPI helper if reachable, `(b)` the `yt.promptinject.me` scraper, or `(c)` timedtext/player endpoints. Text is parsed into segments and rendered in the transcript workspace.
+5. Configure restyling:
    - Choose provider (OpenAI, Anthropic, OpenAI-compatible) and set base URL, model, API key, optional Anthropic version, and concurrency.
    - Pick a style preset or customize the prompt template (`{{style}}`, `{{outlang}}`, `{{currentLine}}`, `{{prevLines}}`, `{{nextLines}}` placeholders).
    - Enable **ASCII-only** and define a blocklist if you need sanitized output.
-   - Click **Restyle All** to process segments in batches; use **Stop** to abort via the service worker.
-5. Review restyled text inline. The transcript list highlights the active segment as the video plays; clicking a row seeks the video.
-6. (Optional) Enable **TTS**:
-   - Choose provider (OpenAI/OpenAI-compatible/Azure/Kokoro/Browser).
-   - Provide voice, format, base URL, API key, and Azure region as needed. Fetch Azure voice catalogs via **Load Voices** in the UI.
+   - Toggle **Single call** if you prefer one request per transcript; the extension now auto-chunks the payload into sub-two-minute groups so providers stay responsive. Use **Stop** to abort via the service worker.
+6. Review restyled text inline. The transcript list highlights the active segment as the video plays; clicking a row seeks the video.
+7. (Optional) Enable **TTS**:
+    - Choose provider (OpenAI/OpenAI-compatible/Azure/Kokoro/Browser).
+    - Provide voice, format, base URL, API key, and Azure region as needed. Fetch Azure voice catalogs via **Load Voices** in the UI.
+    - Set the **Minimal video pause** slider to keep the YouTube player nearly in sync with generated speech; zero means never pause, larger values briefly pause playback for the current chunk.
    - Generate audio for the compiled transcript (first 4000 chars) and download the resulting blob, or use browser SpeechSynthesis for quick previews.
-7. Export via **Export TXT/SRT/VTT/JSON**. TXT includes restyled text when present; JSON captures metadata, restyled fields, timestamps, and export time.
-8. Save presets and preferences with the provided controls. All interactive controls call `savePrefs()` to persist into `chrome.storage.local`.
+8. Export via **Export TXT/SRT/VTT/JSON**. TXT includes restyled text when present; JSON captures metadata, restyled fields, timestamps, and export time.
+9. Save presets and preferences with the provided controls. All interactive controls call `savePrefs()` to persist into `chrome.storage.local`.
 
 ## Configuration & Persistence
 
 - Preference keys live under `chrome.storage.local`:
-  - `ytro_prefs`: main settings (video ID, languages, provider info, prompt, ASCII flags, TTS config, etc.).
+  - `ytro_prefs`: main settings (video ID, languages, provider info, prompt, ASCII flags, TTS config, overlay dock preference, subtitle offset slider, minimal video pause guard, etc.).
   - `ytro_presets`: stored style/TTS presets (`window.ytPresets` mirror).
   - `ytro_theme`: current overlay theme (`theme-dark`, `theme-light`, `theme-system`).
   - `ytro_position`: overlay coordinates for drag-and-drop placement.

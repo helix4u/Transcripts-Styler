@@ -23,10 +23,71 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
     token: null,
     segmentIndex: -1,
     isActive: false,
-    videoPausedForGuard: false
+    videoPausedForGuard: false,
+    resumeTimeoutId: null
   };
 
+  let overlayParked = false;
+  let overlayDockRetryHandle = null;
+  let overlayDockHost = null;
+  const OVERLAY_PARKED_CLASS = 'yt-overlay-parked';
+  const OVERLAY_DOCK_CLASS = 'ts-transcript-dock';
+  const overlayPositionPrefs = { left: 20, top: 20 };
+  let overlayDockPreferred = true;
+  let subtitleOffsetPercent = 12;
+  let guardPauseMs = 800;
+
   const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+  async function waitForElement(selector, options = {}) {
+    const { root = document, timeout = 10000, checkInterval = 100 } = options;
+    const searchRoot = root || document;
+    const existing = searchRoot.querySelector(selector);
+    if (existing) {
+      return existing;
+    }
+
+    return new Promise((resolve, reject) => {
+      const observerTarget = root === document ? document.documentElement : searchRoot;
+      if (!observerTarget) {
+        reject(new Error('waitForElement: invalid root provided'));
+        return;
+      }
+
+      let resolved = false;
+      let timeoutId = null;
+      let intervalId = null;
+      let observer = null;
+
+      const cleanup = () => {
+        if (observer) observer.disconnect();
+        if (intervalId) clearInterval(intervalId);
+        if (timeoutId) clearTimeout(timeoutId);
+      };
+
+      const check = () => {
+        if (resolved) return;
+        const el = searchRoot.querySelector(selector);
+        if (el) {
+          resolved = true;
+          cleanup();
+          resolve(el);
+        }
+      };
+
+      observer = new MutationObserver(check);
+      observer.observe(observerTarget, { childList: true, subtree: true });
+
+      intervalId = setInterval(check, checkInterval);
+
+      timeoutId = setTimeout(() => {
+        cleanup();
+        reject(new Error(`waitForElement timed out for selector: ${selector}`));
+      }, timeout);
+
+      check();
+    });
+  }
 
   // Logging utilities
   function log(...args) {
@@ -50,6 +111,7 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
   <div class="yt-overlay-header">
     <span class="yt-overlay-title">Transcript Styler v0.4.0-test</span>
     <div class="yt-overlay-controls">
+      <button id="yt-dock-toggle" title="Dock in transcript">⇆</button>
       <label><input type="checkbox" id="yt-debug-toggle"> Debug Logging</label>
       <button id="yt-collapse-btn">−</button>
       <button id="yt-close-btn">×</button>
@@ -87,6 +149,11 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
         <button id="yt-export-presets-btn">Export Presets</button>
         <input type="file" id="yt-import-presets-input" accept=".json" style="display: none;">
         <button id="yt-import-presets-btn">Import Presets</button>
+      </div>
+      <div class="yt-controls">
+        <label style="flex: 1;">Subtitle position:</label>
+        <input type="range" id="yt-subtitle-position" min="0" max="40" value="12" step="1" style="flex: 2;">
+        <span id="yt-subtitle-position-value">12%</span>
       </div>
     </div>
 
@@ -270,6 +337,11 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
         <button id="yt-auto-tts-guard-btn" type="button">Enable minimal video pausing</button>
       </div>
       <div class="yt-controls">
+        <label style="flex: 1;">Pause duration:</label>
+        <input type="range" id="yt-guard-pause" min="0" max="3000" step="100" value="800" style="flex: 2;">
+        <span id="yt-guard-pause-value">0.8s</span>
+      </div>
+      <div class="yt-controls">
         <label><input type="checkbox" id="yt-furigana"> Show furigana for Japanese text</label>
         <label><input type="checkbox" id="yt-show-both"> Show both original and styled text over video</label>
       </div>
@@ -286,13 +358,167 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
   // Append overlay to page
   document.body.appendChild(overlay);
 
+  function findTranscriptToggleButton() {
+    return (
+      Array.from(document.querySelectorAll('button, yt-button-shape button')).find(btn => {
+        const label = `${
+          btn.getAttribute('aria-label') || ''
+        } ${btn.textContent || ''}`.toLowerCase();
+        return label.includes('transcript');
+      }) || null
+    );
+  }
+
+  function hideNativeTranscript(section) {
+    if (!section) return;
+    section
+      .querySelectorAll(
+        'ytd-transcript-renderer, ytd-transcript-section-renderer, ytd-transcript-segment-list-renderer, ytd-transcript-search-panel-renderer'
+      )
+      .forEach(node => {
+        node.style.display = 'none';
+      });
+  }
+
+  function restoreNativeTranscript(section) {
+    const target = section || document;
+    target
+      .querySelectorAll(
+        'ytd-transcript-renderer, ytd-transcript-section-renderer, ytd-transcript-segment-list-renderer, ytd-transcript-search-panel-renderer'
+      )
+      .forEach(node => {
+        node.style.display = '';
+      });
+  }
+
+  function parkOverlayInTranscriptSection(panel) {
+    if (!overlayDockPreferred) return;
+    if (!panel || overlayParked) return;
+
+    if (overlayDockRetryHandle) {
+      clearTimeout(overlayDockRetryHandle);
+      overlayDockRetryHandle = null;
+    }
+
+    panel.setAttribute('visibility', 'ENGAGEMENT_PANEL_VISIBILITY_EXPANDED');
+
+    const contentContainer = panel.querySelector('#content') || panel;
+    let host = contentContainer.querySelector(`.${OVERLAY_DOCK_CLASS}`);
+
+    if (!host) {
+      host = document.createElement('div');
+      host.className = OVERLAY_DOCK_CLASS;
+      host.style.width = '100%';
+      host.style.marginTop = '12px';
+      contentContainer.insertBefore(host, contentContainer.firstChild || null);
+    }
+
+    if (!host.contains(overlay)) {
+      host.innerHTML = '';
+      host.appendChild(overlay);
+    }
+
+    overlay.classList.add(OVERLAY_PARKED_CLASS);
+    overlay.style.left = '';
+    overlay.style.top = '';
+    overlayParked = true;
+    overlayDockHost = host;
+    hideNativeTranscript(panel);
+    syncDockToggleUI();
+
+    const overlayContent = overlay.querySelector('.yt-overlay-content');
+    if (overlayContent) {
+      overlayContent.scrollTop = 0;
+    }
+  }
+
+  function unparkOverlay() {
+    if (overlayDockRetryHandle) {
+      clearTimeout(overlayDockRetryHandle);
+      overlayDockRetryHandle = null;
+    }
+
+    const parentSection = overlayDockHost
+      ? overlayDockHost.closest(
+          'ytd-video-description-transcript-section-renderer, ytd-engagement-panel-section-list-renderer'
+        )
+      : null;
+
+    if (!overlayParked) {
+      restoreNativeTranscript(parentSection);
+      overlayDockHost = null;
+      if (!document.body.contains(overlay)) {
+        document.body.appendChild(overlay);
+      }
+      return;
+    }
+
+    overlayParked = false;
+    overlay.classList.remove(OVERLAY_PARKED_CLASS);
+    if (!document.body.contains(overlay)) {
+      document.body.appendChild(overlay);
+    }
+    overlay.style.left = `${Number.isFinite(overlayPositionPrefs.left) ? overlayPositionPrefs.left : 20}px`;
+    overlay.style.top = `${Number.isFinite(overlayPositionPrefs.top) ? overlayPositionPrefs.top : 20}px`;
+    restoreNativeTranscript(parentSection);
+    overlayDockHost = null;
+    syncDockToggleUI();
+  }
+
+  async function attemptParkOverlay() {
+    if (!overlayDockPreferred) return;
+    if (overlayParked) return;
+
+    if (overlayDockRetryHandle) {
+      clearTimeout(overlayDockRetryHandle);
+      overlayDockRetryHandle = null;
+    }
+
+    try {
+      const toggleButton = findTranscriptToggleButton();
+      if (toggleButton) {
+        const expanded = toggleButton.getAttribute('aria-expanded');
+        const label = `${toggleButton.getAttribute('aria-label') || toggleButton.textContent || ''}`;
+        const normalized = label.toLowerCase();
+        if (expanded !== 'true' && !normalized.includes('hide transcript')) {
+          toggleButton.click();
+          await wait(500);
+        }
+      }
+
+      const panel = await waitForElement(
+        "ytd-engagement-panel-section-list-renderer[target-id='engagement-panel-searchable-transcript']",
+        {
+          timeout: 20000
+        }
+      );
+      if (!panel) return;
+
+      panel.setAttribute('visibility', 'ENGAGEMENT_PANEL_VISIBILITY_EXPANDED');
+
+      if (!panel.querySelector('ytd-transcript-renderer')) {
+        await wait(500);
+      }
+
+      parkOverlayInTranscriptSection(panel);
+    } catch (error) {
+      log('Transcript docking attempt failed:', error);
+      if (!overlayParked) {
+        overlayDockRetryHandle = setTimeout(() => {
+          overlayDockRetryHandle = null;
+          attemptParkOverlay();
+        }, 5000);
+      }
+    }
+  }
+
   // Global functions for UI interactions
   async function getPrefs() {
     try {
       const response = await sendMessage('GET_PREFS', {
         keys: ['ytro_prefs']
       });
-      
+
       if (response.success && response.data.ytro_prefs) {
         return response.data.ytro_prefs;
       }
@@ -310,7 +536,7 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
 
     const segment = transcriptData[segmentIndex];
     let textToSpeak = '';
-    
+
     if (textType === 'original') {
       textToSpeak = segment.text || '';
     } else if (textType === 'restyled') {
@@ -338,7 +564,7 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
     try {
       // Get current TTS settings
       const prefs = await getPrefs();
-      
+
       if (!prefs.ttsEnabled) {
         setStatus('TTS is not enabled. Enable it in the TTS section first.');
         return;
@@ -346,7 +572,9 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
 
       // Check for ASCII-only mode with non-ASCII text
       if (prefs.asciiOnly && /[^\x00-\x7F]/.test(textToSpeak)) {
-        setStatus('Warning: ASCII-only mode is enabled but text contains Unicode characters. TTS may not work properly.');
+        setStatus(
+          'Warning: ASCII-only mode is enabled but text contains Unicode characters. TTS may not work properly.'
+        );
         log('ASCII-only mode warning: Text contains non-ASCII characters:', textToSpeak);
       }
 
@@ -386,12 +614,16 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
           let selectedVoice = null;
 
           if (prefs.ttsVoice) {
-            selectedVoice = voices.find(v => v.name === prefs.ttsVoice || v.voiceURI === prefs.ttsVoice);
+            selectedVoice = voices.find(
+              v => v.name === prefs.ttsVoice || v.voiceURI === prefs.ttsVoice
+            );
 
             if (!selectedVoice) {
               const languageCode = prefs.ttsVoice.toLowerCase();
               selectedVoice = voices.find(
-                v => v.lang.toLowerCase().includes(languageCode) || v.name.toLowerCase().includes(languageCode)
+                v =>
+                  v.lang.toLowerCase().includes(languageCode) ||
+                  v.name.toLowerCase().includes(languageCode)
               );
             }
           }
@@ -399,7 +631,8 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
           if (!selectedVoice) {
             if (/[\u3040-\u309f\u30a0-\u30ff\u4e00-\u9faf]/.test(cleanText)) {
               selectedVoice = voices.find(
-                v => v.lang.toLowerCase().includes('ja') || v.lang.toLowerCase().includes('japanese')
+                v =>
+                  v.lang.toLowerCase().includes('ja') || v.lang.toLowerCase().includes('japanese')
               );
               if (selectedVoice) {
                 log(`Auto-selected Japanese voice: ${selectedVoice.name}`);
@@ -553,7 +786,7 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
       logError('TTS request failed:', error);
       setError('Failed to generate TTS audio');
     }
-  };
+  }
 
   // Element references
   const elements = {
@@ -561,6 +794,7 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
     collapseBtn: document.getElementById('yt-collapse-btn'),
     closeBtn: document.getElementById('yt-close-btn'),
     content: document.querySelector('.yt-overlay-content'),
+    dockToggle: document.getElementById('yt-dock-toggle'),
 
     videoId: document.getElementById('yt-video-id'),
     detectBtn: document.getElementById('yt-detect-btn'),
@@ -573,6 +807,8 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
     exportPresetsBtn: document.getElementById('yt-export-presets-btn'),
     importPresetsInput: document.getElementById('yt-import-presets-input'),
     importPresetsBtn: document.getElementById('yt-import-presets-btn'),
+    subtitlePosition: document.getElementById('yt-subtitle-position'),
+    subtitlePositionValue: document.getElementById('yt-subtitle-position-value'),
 
     langPrefs: document.getElementById('yt-lang-prefs'),
     fontSize: document.getElementById('yt-font-size'),
@@ -625,11 +861,16 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
     autoTts: document.getElementById('yt-auto-tts'),
     autoTtsType: document.getElementById('yt-auto-tts-type'),
     autoTtsGuardBtn: document.getElementById('yt-auto-tts-guard-btn'),
+    guardPauseSlider: document.getElementById('yt-guard-pause'),
+    guardPauseValue: document.getElementById('yt-guard-pause-value'),
     furigana: document.getElementById('yt-furigana'),
     showBoth: document.getElementById('yt-show-both'),
     status: document.getElementById('yt-status')
   };
 
+  syncDockToggleUI();
+  syncGuardPauseUI();
+  applySubtitleOffset(subtitleOffsetPercent);
   syncAutoTtsGuardUi();
 
   // Default values
@@ -848,7 +1089,7 @@ Context (next fragments):
       });
 
       if (response.success) {
-    const { ytro_prefs, ytro_presets, ytro_debug, ytro_theme, ytro_position } = response.data;
+        const { ytro_prefs, ytro_presets, ytro_debug, ytro_theme, ytro_position } = response.data;
 
         // Apply debug setting
         if (ytro_debug !== undefined) {
@@ -867,13 +1108,19 @@ Context (next fragments):
         if (ytro_position) {
           overlay.style.left = `${ytro_position.left}px`;
           overlay.style.top = `${ytro_position.top}px`;
+          if (Number.isFinite(ytro_position.left)) {
+            overlayPositionPrefs.left = ytro_position.left;
+          }
+          if (Number.isFinite(ytro_position.top)) {
+            overlayPositionPrefs.top = ytro_position.top;
+          }
         }
 
         // Load preferences
         if (ytro_prefs) {
           setIf(elements.videoId, ytro_prefs.videoId);
-    setIf(elements.langPrefs, ytro_prefs.langPrefs);
-    setIf(elements.fontSize, ytro_prefs.fontSize);
+          setIf(elements.langPrefs, ytro_prefs.langPrefs);
+          setIf(elements.fontSize, ytro_prefs.fontSize);
           setIf(elements.outputLang, ytro_prefs.outputLang);
           setIf(elements.customLang, ytro_prefs.customLang);
           setIf(elements.provider, ytro_prefs.provider);
@@ -890,6 +1137,17 @@ Context (next fragments):
           setIf(elements.temperature, ytro_prefs.temperature);
           setIf(elements.styleText, ytro_prefs.styleText);
 
+          if (ytro_prefs.subtitleOffset !== undefined) {
+            subtitleOffsetPercent = Math.max(
+              0,
+              Math.min(60, parseInt(ytro_prefs.subtitleOffset, 10) || 0)
+            );
+          }
+          if (elements.subtitlePosition) {
+            elements.subtitlePosition.value = String(subtitleOffsetPercent);
+          }
+          applySubtitleOffset(subtitleOffsetPercent);
+
           // Auto-TTS settings
           setIf(elements.autoTts, ytro_prefs.autoTts, 'checked');
           setIf(elements.autoTtsType, ytro_prefs.autoTtsType);
@@ -897,9 +1155,14 @@ Context (next fragments):
           autoTtsInterruptGuardEnabled = Boolean(ytro_prefs.autoTtsGuard);
           syncAutoTtsGuardUi();
 
+          if (ytro_prefs.guardPauseMs !== undefined) {
+            guardPauseMs = Math.max(0, parseInt(ytro_prefs.guardPauseMs, 10) || 0);
+          }
+          syncGuardPauseUI();
+
           // Furigana settings
           setIf(elements.furigana, ytro_prefs.furigana, 'checked');
-    setIf(elements.showBoth, ytro_prefs.showBoth, 'checked');
+          setIf(elements.showBoth, ytro_prefs.showBoth, 'checked');
 
           // TTS settings
           setIf(elements.ttsEnabled, ytro_prefs.ttsEnabled, 'checked');
@@ -909,9 +1172,15 @@ Context (next fragments):
           setIf(elements.azureRegion, ytro_prefs.azureRegion);
           setIf(elements.ttsRate, ytro_prefs.ttsRate);
 
+          if (typeof ytro_prefs.overlayDockPreferred === 'boolean') {
+            overlayDockPreferred = ytro_prefs.overlayDockPreferred;
+          }
+
+          syncDockToggleUI();
+
           Object.assign(lastPrefs, ytro_prefs);
-        syncProviderUI();
-        applyFontSize(ytro_prefs.fontSize);
+          syncProviderUI();
+          applyFontSize(ytro_prefs.fontSize);
           syncTtsUI();
         }
 
@@ -936,8 +1205,6 @@ Context (next fragments):
     }
   }
 
-  
-
   // Save preferences
   async function savePrefs() {
     const prefs = {
@@ -945,14 +1212,14 @@ Context (next fragments):
       langPrefs: elements.langPrefs.value,
       outputLang: elements.outputLang.value,
       customLang: elements.customLang.value,
-    provider: elements.provider.value,
-    baseUrl: elements.baseUrl.value,
-    model: elements.model.value,
-    anthropicVersion:
-      elements.provider.value === 'anthropic' ? elements.anthropicVersion.value.trim() : '',
-    concurrency: parseInt(elements.concurrency.value) || 3,
-    stylePreset: elements.stylePreset.value,
-    fontSize: parseInt(elements.fontSize.value, 10) || DEFAULT_FONT_SIZE,
+      provider: elements.provider.value,
+      baseUrl: elements.baseUrl.value,
+      model: elements.model.value,
+      anthropicVersion:
+        elements.provider.value === 'anthropic' ? elements.anthropicVersion.value.trim() : '',
+      concurrency: parseInt(elements.concurrency.value) || 3,
+      stylePreset: elements.stylePreset.value,
+      fontSize: parseInt(elements.fontSize.value, 10) || DEFAULT_FONT_SIZE,
       promptTemplate: elements.promptTemplate.value,
       asciiOnly: elements.asciiOnly.checked,
       blocklist: elements.blocklist.value,
@@ -960,15 +1227,17 @@ Context (next fragments):
       maxTokens: parseInt(elements.maxTokens?.value, 10) || 1000,
       temperature: parseFloat(elements.temperature?.value) || 0.7,
       styleText: elements.styleText?.value || '',
+      subtitleOffset: subtitleOffsetPercent,
 
       // Auto-TTS settings
       autoTts: elements.autoTts?.checked || false,
       autoTtsType: elements.autoTtsType?.value || 'original',
       autoTtsGuard: autoTtsInterruptGuardEnabled,
+      guardPauseMs,
 
       // Furigana settings
       furigana: elements.furigana?.checked || false,
-    showBoth: elements.showBoth?.checked || false,
+      showBoth: elements.showBoth?.checked || false,
 
       // TTS settings
       ttsEnabled: elements.ttsEnabled.checked,
@@ -976,7 +1245,9 @@ Context (next fragments):
       ttsVoice: elements.ttsVoice.value,
       ttsFormat: elements.ttsFormat.value,
       azureRegion: elements.azureRegion.value,
-      ttsRate: parseFloat(elements.ttsRate.value) || 1.0
+      ttsRate: parseFloat(elements.ttsRate.value) || 1.0,
+
+      overlayDockPreferred
     };
 
     try {
@@ -1069,8 +1340,6 @@ Context (next fragments):
     }
   }
 
-
-
   // Parsing functions
   function ensureSubtitleOverlay() {
     if (!subtitleOverlayEl) {
@@ -1090,7 +1359,19 @@ Context (next fragments):
       }
       player.appendChild(subtitleOverlayEl);
     }
+    subtitleOverlayEl.style.bottom = `${subtitleOffsetPercent}%`;
     return subtitleOverlayEl;
+  }
+
+  function applySubtitleOffset(percent = subtitleOffsetPercent) {
+    subtitleOffsetPercent = Math.min(Math.max(Number(percent) || 0, 0), 60);
+    const overlayEl = ensureSubtitleOverlay();
+    if (overlayEl) {
+      overlayEl.style.bottom = `${subtitleOffsetPercent}%`;
+    }
+    if (elements.subtitlePositionValue) {
+      elements.subtitlePositionValue.textContent = `${subtitleOffsetPercent}%`;
+    }
   }
 
   function updateSubtitleText(segment) {
@@ -1100,27 +1381,31 @@ Context (next fragments):
     if (segment && (segment.restyled || segment.text)) {
       const originalText = segment.text || '';
       const restyledText = segment.restyled || '';
-      
+
       let textToShow = '';
-      
+
       if (elements.showBoth?.checked && originalText && restyledText) {
         // Show both original and restyled text
-        const displayOriginal = elements.furigana?.checked ? generateFurigana(originalText) : originalText;
-        const displayRestyled = elements.furigana?.checked ? generateFurigana(restyledText) : restyledText;
-        
+        const displayOriginal = elements.furigana?.checked
+          ? generateFurigana(originalText)
+          : originalText;
+        const displayRestyled = elements.furigana?.checked
+          ? generateFurigana(restyledText)
+          : restyledText;
+
         textToShow = `<div class="subtitle-original">${displayOriginal}</div><div class="subtitle-restyled">${displayRestyled}</div>`;
         overlay.innerHTML = textToShow;
       } else {
         // Show only one text (prefer restyled if available)
         textToShow = restyledText || originalText;
-        
+
         if (elements.furigana?.checked) {
           overlay.innerHTML = generateFurigana(textToShow);
         } else {
           overlay.textContent = textToShow;
         }
       }
-      
+
       overlay.style.display = textToShow ? 'block' : 'none';
     } else {
       overlay.textContent = '';
@@ -1132,7 +1417,38 @@ Context (next fragments):
     return document.querySelector('video');
   }
 
+  function clearGuardResumeTimer() {
+    if (autoTtsGuardState.resumeTimeoutId) {
+      clearTimeout(autoTtsGuardState.resumeTimeoutId);
+      autoTtsGuardState.resumeTimeoutId = null;
+    }
+  }
+
+  function pauseVideoForGuard(durationMs = guardPauseMs) {
+    if (durationMs <= 0) {
+      return;
+    }
+
+    const video = getVideoElement();
+    if (video && !video.paused && !video.ended) {
+      try {
+        video.pause();
+        autoTtsGuardState.videoPausedForGuard = true;
+      } catch (error) {
+        logError('Failed to pause video for auto TTS guard:', error);
+      }
+    }
+
+    clearGuardResumeTimer();
+    autoTtsGuardState.resumeTimeoutId = setTimeout(() => {
+      autoTtsGuardState.resumeTimeoutId = null;
+      resumeGuardedVideo();
+    }, durationMs);
+  }
+
   function resumeGuardedVideo() {
+    clearGuardResumeTimer();
+
     if (!autoTtsGuardState.videoPausedForGuard) {
       return;
     }
@@ -1152,9 +1468,11 @@ Context (next fragments):
     autoTtsGuardState.segmentIndex = -1;
     autoTtsGuardState.isActive = false;
     autoTtsGuardState.videoPausedForGuard = false;
+    clearGuardResumeTimer();
   }
 
   function releaseAutoTtsGuard({ resumeVideo = false } = {}) {
+    clearGuardResumeTimer();
     if (resumeVideo) {
       resumeGuardedVideo();
     } else {
@@ -1243,18 +1561,19 @@ Context (next fragments):
           lastAutoTtsSegment = index;
           const textType = elements.autoTtsType?.value || 'original';
 
-          const playbackPromise = Promise.resolve().then(() => playSegmentTTS(index, textType));
+          const startPlayback = () => playSegmentTTS(index, textType);
+          const playbackPromise = Promise.resolve().then(startPlayback);
 
           playbackPromise.catch(error => {
             logError('Auto TTS playback failed:', error);
           });
 
           if (autoTtsInterruptGuardEnabled) {
+            pauseVideoForGuard(guardPauseMs);
             const guardToken = Symbol('auto-tts-guard');
             autoTtsGuardState.token = guardToken;
             autoTtsGuardState.segmentIndex = index;
             autoTtsGuardState.isActive = true;
-            autoTtsGuardState.videoPausedForGuard = false;
 
             playbackPromise.finally(() => {
               if (autoTtsGuardState.token === guardToken) {
@@ -1277,7 +1596,16 @@ Context (next fragments):
       const isActive = idx === activeSegmentIndex && idx !== -1;
       item.classList.toggle('active', isActive);
       if (isActive && scrollIntoView) {
-        item.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+        const list = elements.transcriptList;
+        const itemRect = item.getBoundingClientRect();
+        const listRect = list.getBoundingClientRect();
+        if (itemRect.top < listRect.top || itemRect.bottom > listRect.bottom) {
+          const offset = item.offsetTop;
+          list.scrollTo({
+            top: offset - list.clientHeight / 2 + item.clientHeight / 2,
+            behavior: 'smooth'
+          });
+        }
       }
     });
   }
@@ -1313,8 +1641,14 @@ Context (next fragments):
         const restyled = segment.restyled || '';
 
         // Apply furigana if enabled
-        const originalText = elements.furigana?.checked ? generateFurigana(segment.text) : escapeHtml(segment.text);
-        const restyledText = restyled ? (elements.furigana?.checked ? generateFurigana(restyled) : escapeHtml(restyled)) : '';
+        const originalText = elements.furigana?.checked
+          ? generateFurigana(segment.text)
+          : escapeHtml(segment.text);
+        const restyledText = restyled
+          ? elements.furigana?.checked
+            ? generateFurigana(restyled)
+            : escapeHtml(restyled)
+          : '';
 
         return `
       <div class="yt-transcript-item" data-index="${originalIndex}" data-start="${segment.start ?? 0}">
@@ -1324,16 +1658,20 @@ Context (next fragments):
             <span class="yt-speaker-icon" title="Play original text" data-segment-index="${originalIndex}" data-text-type="original">🔊</span>
             ${originalText}
           </div>
-          ${restyled ? `<div class="yt-restyled">
+          ${
+            restyled
+              ? `<div class="yt-restyled">
             <span class="yt-speaker-icon" title="Play restyled text" data-segment-index="${originalIndex}" data-text-type="restyled">🔊</span>
             ${restyledText}
-          </div>` : ''}
+          </div>`
+              : ''
+          }
         </div>
       </div>
     `;
       })
       .join('');
-    
+
     // Add event listeners for speaker icons
     elements.transcriptList.querySelectorAll('.yt-speaker-icon').forEach(icon => {
       icon.addEventListener('click', () => {
@@ -1342,7 +1680,7 @@ Context (next fragments):
         playSegmentTTS(segmentIndex, textType);
       });
     });
-    
+
     applyActiveHighlight();
     applyActiveHighlight(false);
   }
@@ -1362,298 +1700,1121 @@ Context (next fragments):
     // Comprehensive kanji readings mapping
     const kanjiReadings = {
       // Basic pronouns and particles
-      '私': 'わたし', '僕': 'ぼく', '君': 'きみ', 'あなた': 'あなた', '彼': 'かれ', '彼女': 'かのじょ',
-      '私たち': 'わたしたち', '皆': 'みんな', '自分': 'じぶん', '人': 'ひと', '方': 'かた',
-      
+      私: 'わたし',
+      僕: 'ぼく',
+      君: 'きみ',
+      あなた: 'あなた',
+      彼: 'かれ',
+      彼女: 'かのじょ',
+      私たち: 'わたしたち',
+      皆: 'みんな',
+      自分: 'じぶん',
+      人: 'ひと',
+      方: 'かた',
+
       // Time and dates
-      '今日': 'きょう', '明日': 'あした', '昨日': 'きのう', '今年': 'ことし', '来年': 'らいねん', '去年': 'きょねん',
-      '今月': 'こんげつ', '来月': 'らいげつ', '先月': 'せんげつ', '今週': 'こんしゅう', '来週': 'らいしゅう', '先週': 'せんしゅう',
-      '時間': 'じかん', '時': 'とき', '分': 'ふん', '秒': 'びょう', '年': 'ねん', '月': 'つき', '日': 'ひ', '週': 'しゅう',
-      '朝': 'あさ', '昼': 'ひる', '夜': 'よる', '夕方': 'ゆうがた', '夜中': 'よなか',
-      
+      今日: 'きょう',
+      明日: 'あした',
+      昨日: 'きのう',
+      今年: 'ことし',
+      来年: 'らいねん',
+      去年: 'きょねん',
+      今月: 'こんげつ',
+      来月: 'らいげつ',
+      先月: 'せんげつ',
+      今週: 'こんしゅう',
+      来週: 'らいしゅう',
+      先週: 'せんしゅう',
+      時間: 'じかん',
+      時: 'とき',
+      分: 'ふん',
+      秒: 'びょう',
+      年: 'ねん',
+      月: 'つき',
+      日: 'ひ',
+      週: 'しゅう',
+      朝: 'あさ',
+      昼: 'ひる',
+      夜: 'よる',
+      夕方: 'ゆうがた',
+      夜中: 'よなか',
+
       // Numbers and quantities
-      '一': 'いち', '二': 'に', '三': 'さん', '四': 'よん', '五': 'ご', '六': 'ろく', '七': 'なな', '八': 'はち', '九': 'きゅう', '十': 'じゅう',
-      '百': 'ひゃく', '千': 'せん', '万': 'まん', '億': 'おく', '兆': 'ちょう',
-      '何': 'なに', '誰': 'だれ', 'どこ': 'どこ', 'なぜ': 'なぜ', 'どう': 'どう', '何時': 'なんじ', 'いくつ': 'いくつ',
-      '多': 'おお', '少': 'すく', '全部': 'ぜんぶ', '半分': 'はんぶん', '少し': 'すこし', 'たくさん': 'たくさん',
-      
+      一: 'いち',
+      二: 'に',
+      三: 'さん',
+      四: 'よん',
+      五: 'ご',
+      六: 'ろく',
+      七: 'なな',
+      八: 'はち',
+      九: 'きゅう',
+      十: 'じゅう',
+      百: 'ひゃく',
+      千: 'せん',
+      万: 'まん',
+      億: 'おく',
+      兆: 'ちょう',
+      何: 'なに',
+      誰: 'だれ',
+      どこ: 'どこ',
+      なぜ: 'なぜ',
+      どう: 'どう',
+      何時: 'なんじ',
+      いくつ: 'いくつ',
+      多: 'おお',
+      少: 'すく',
+      全部: 'ぜんぶ',
+      半分: 'はんぶん',
+      少し: 'すこし',
+      たくさん: 'たくさん',
+
       // Directions and positions
-      '上': 'うえ', '下': 'した', '中': 'なか', '外': 'そと', '内': 'うち', '前': 'まえ', '後': 'うしろ', '右': 'みぎ', '左': 'ひだり',
-      '東': 'ひがし', '西': 'にし', '南': 'みなみ', '北': 'きた', '中央': 'ちゅうおう', '周り': 'まわり',
-      
+      上: 'うえ',
+      下: 'した',
+      中: 'なか',
+      外: 'そと',
+      内: 'うち',
+      前: 'まえ',
+      後: 'うしろ',
+      右: 'みぎ',
+      左: 'ひだり',
+      東: 'ひがし',
+      西: 'にし',
+      南: 'みなみ',
+      北: 'きた',
+      中央: 'ちゅうおう',
+      周り: 'まわり',
+
       // Basic adjectives
-      '大': 'おお', '小': 'ちい', '新': 'あたら', '古': 'ふる', '高': 'たか', '低': 'ひく', '長': 'なが', '短': 'みじか',
-      '早': 'はや', '遅': 'おそ', '良': 'よ', '悪': 'わる', '美': 'うつく', '醜': 'みにく', '強': 'つよ', '弱': 'よわ',
-      '重': 'おも', '軽': 'かる', '熱': 'あつ', '冷': 'つめ', '明': 'あか', '暗': 'くら', '静': 'しず', '騒': 'さわ',
-      '楽': 'たの', '苦': 'くる', '安': 'やす', '危': 'あぶ', '正': 'ただ', '間': 'あいだ', '忙': 'いそが', '暇': 'ひま',
-      
+      大: 'おお',
+      小: 'ちい',
+      新: 'あたら',
+      古: 'ふる',
+      高: 'たか',
+      低: 'ひく',
+      長: 'なが',
+      短: 'みじか',
+      早: 'はや',
+      遅: 'おそ',
+      良: 'よ',
+      悪: 'わる',
+      美: 'うつく',
+      醜: 'みにく',
+      強: 'つよ',
+      弱: 'よわ',
+      重: 'おも',
+      軽: 'かる',
+      熱: 'あつ',
+      冷: 'つめ',
+      明: 'あか',
+      暗: 'くら',
+      静: 'しず',
+      騒: 'さわ',
+      楽: 'たの',
+      苦: 'くる',
+      安: 'やす',
+      危: 'あぶ',
+      正: 'ただ',
+      間: 'あいだ',
+      忙: 'いそが',
+      暇: 'ひま',
+
       // Common nouns - people and relationships
-      '家族': 'かぞく', '父': 'ちち', '母': 'はは', '兄': 'あに', '姉': 'あね', '弟': 'おとうと', '妹': 'いもうと',
-      '息子': 'むすこ', '娘': 'むすめ', '夫': 'おっと', '妻': 'つま', '友達': 'ともだち', '恋人': 'こいびと',
-      '先生': 'せんせい', '生徒': 'せいと', '学生': 'がくせい', '医者': 'いしゃ', '看護師': 'かんごし',
-      '会社員': 'かいしゃいん', '店員': 'てんいん', '警察官': 'けいさつかん', '消防士': 'しょうぼうし',
-      
+      家族: 'かぞく',
+      父: 'ちち',
+      母: 'はは',
+      兄: 'あに',
+      姉: 'あね',
+      弟: 'おとうと',
+      妹: 'いもうと',
+      息子: 'むすこ',
+      娘: 'むすめ',
+      夫: 'おっと',
+      妻: 'つま',
+      友達: 'ともだち',
+      恋人: 'こいびと',
+      先生: 'せんせい',
+      生徒: 'せいと',
+      学生: 'がくせい',
+      医者: 'いしゃ',
+      看護師: 'かんごし',
+      会社員: 'かいしゃいん',
+      店員: 'てんいん',
+      警察官: 'けいさつかん',
+      消防士: 'しょうぼうし',
+
       // Body parts
-      '体': 'からだ', '頭': 'あたま', '顔': 'かお', '目': 'め', '耳': 'みみ', '鼻': 'はな', '口': 'くち', '歯': 'は',
-      '首': 'くび', '肩': 'かた', '手': 'て', '指': 'ゆび', '足': 'あし', '背中': 'せなか', '胸': 'むね', '心': 'こころ',
-      
+      体: 'からだ',
+      頭: 'あたま',
+      顔: 'かお',
+      目: 'め',
+      耳: 'みみ',
+      鼻: 'はな',
+      口: 'くち',
+      歯: 'は',
+      首: 'くび',
+      肩: 'かた',
+      手: 'て',
+      指: 'ゆび',
+      足: 'あし',
+      背中: 'せなか',
+      胸: 'むね',
+      心: 'こころ',
+
       // Common objects
-      '物': 'もの', '事': 'こと', '所': 'ところ', '場所': 'ばしょ', '家': 'いえ', '部屋': 'へや', '窓': 'まど', 'ドア': 'ドア',
-      '椅子': 'いす', '机': 'つくえ', 'ベッド': 'ベッド', '本': 'ほん', '紙': 'かみ', '鉛筆': 'えんぴつ', 'ペン': 'ペン',
-      '電話': 'でんわ', 'コンピューター': 'コンピューター', 'テレビ': 'テレビ', 'ラジオ': 'ラジオ', 'カメラ': 'カメラ',
-      '車': 'くるま', '電車': 'でんしゃ', 'バス': 'バス', '飛行機': 'ひこうき', '船': 'ふね', '自転車': 'じてんしゃ',
-      
+      物: 'もの',
+      事: 'こと',
+      所: 'ところ',
+      場所: 'ばしょ',
+      家: 'いえ',
+      部屋: 'へや',
+      窓: 'まど',
+      ドア: 'ドア',
+      椅子: 'いす',
+      机: 'つくえ',
+      ベッド: 'ベッド',
+      本: 'ほん',
+      紙: 'かみ',
+      鉛筆: 'えんぴつ',
+      ペン: 'ペン',
+      電話: 'でんわ',
+      コンピューター: 'コンピューター',
+      テレビ: 'テレビ',
+      ラジオ: 'ラジオ',
+      カメラ: 'カメラ',
+      車: 'くるま',
+      電車: 'でんしゃ',
+      バス: 'バス',
+      飛行機: 'ひこうき',
+      船: 'ふね',
+      自転車: 'じてんしゃ',
+
       // Places and locations
-      '学校': 'がっこう', '会社': 'かいしゃ', '病院': 'びょういん', '銀行': 'ぎんこう', '郵便局': 'ゆうびんきょく',
-      '駅': 'えき', '空港': 'くうこう', '港': 'みなと', '公園': 'こうえん', '図書館': 'としょかん', '美術館': 'びじゅつかん',
-      '店': 'みせ', 'レストラン': 'レストラン', 'ホテル': 'ホテル', '道': 'みち', '橋': 'はし', '建物': 'たてもの',
-      
+      学校: 'がっこう',
+      会社: 'かいしゃ',
+      病院: 'びょういん',
+      銀行: 'ぎんこう',
+      郵便局: 'ゆうびんきょく',
+      駅: 'えき',
+      空港: 'くうこう',
+      港: 'みなと',
+      公園: 'こうえん',
+      図書館: 'としょかん',
+      美術館: 'びじゅつかん',
+      店: 'みせ',
+      レストラン: 'レストラン',
+      ホテル: 'ホテル',
+      道: 'みち',
+      橋: 'はし',
+      建物: 'たてもの',
+
       // Nature and weather
-      '空': 'そら', '山': 'やま', '川': 'かわ', '海': 'うみ', '湖': 'みずうみ', '森': 'もり', '木': 'き', '花': 'はな',
-      '草': 'くさ', '太陽': 'たいよう', '月': 'つき', '星': 'ほし', '雲': 'くも', '風': 'かぜ', '雨': 'あめ', '雪': 'ゆき',
-      '火': 'ひ', '水': 'みず', '土': 'つち', '石': 'いし', '砂': 'すな',
-      
+      空: 'そら',
+      山: 'やま',
+      川: 'かわ',
+      海: 'うみ',
+      湖: 'みずうみ',
+      森: 'もり',
+      木: 'き',
+      花: 'はな',
+      草: 'くさ',
+      太陽: 'たいよう',
+      月: 'つき',
+      星: 'ほし',
+      雲: 'くも',
+      風: 'かぜ',
+      雨: 'あめ',
+      雪: 'ゆき',
+      火: 'ひ',
+      水: 'みず',
+      土: 'つち',
+      石: 'いし',
+      砂: 'すな',
+
       // Animals
-      '動物': 'どうぶつ', '犬': 'いぬ', '猫': 'ねこ', '鳥': 'とり', '魚': 'さかな', '馬': 'うま', '牛': 'うし', '豚': 'ぶた',
-      '羊': 'ひつじ', '猿': 'さる', '熊': 'くま', '象': 'ぞう', 'ライオン': 'ライオン', '虎': 'とら',
-      
+      動物: 'どうぶつ',
+      犬: 'いぬ',
+      猫: 'ねこ',
+      鳥: 'とり',
+      魚: 'さかな',
+      馬: 'うま',
+      牛: 'うし',
+      豚: 'ぶた',
+      羊: 'ひつじ',
+      猿: 'さる',
+      熊: 'くま',
+      象: 'ぞう',
+      ライオン: 'ライオン',
+      虎: 'とら',
+
       // Food and drinks
-      '食べ物': 'たべもの', '飲み物': 'のみもの', '食事': 'しょくじ', '朝食': 'ちょうしょく', '昼食': 'ちゅうしょく', '夕食': 'ゆうしょく',
-      '米': 'こめ', 'パン': 'パン', '肉': 'にく', '魚': 'さかな', '野菜': 'やさい', '果物': 'くだもの', '卵': 'たまご',
-      '牛乳': 'ぎゅうにゅう', '水': 'みず', 'お茶': 'おちゃ', 'コーヒー': 'コーヒー', 'ビール': 'ビール', '酒': 'さけ',
-      
+      食べ物: 'たべもの',
+      飲み物: 'のみもの',
+      食事: 'しょくじ',
+      朝食: 'ちょうしょく',
+      昼食: 'ちゅうしょく',
+      夕食: 'ゆうしょく',
+      米: 'こめ',
+      パン: 'パン',
+      肉: 'にく',
+      魚: 'さかな',
+      野菜: 'やさい',
+      果物: 'くだもの',
+      卵: 'たまご',
+      牛乳: 'ぎゅうにゅう',
+      水: 'みず',
+      お茶: 'おちゃ',
+      コーヒー: 'コーヒー',
+      ビール: 'ビール',
+      酒: 'さけ',
+
       // Clothing
-      '服': 'ふく', 'シャツ': 'シャツ', 'ズボン': 'ズボン', 'スカート': 'スカート', 'ドレス': 'ドレス', '靴': 'くつ',
-      '帽子': 'ぼうし', '眼鏡': 'めがね', '時計': 'とけい', '鞄': 'かばん',
-      
+      服: 'ふく',
+      シャツ: 'シャツ',
+      ズボン: 'ズボン',
+      スカート: 'スカート',
+      ドレス: 'ドレス',
+      靴: 'くつ',
+      帽子: 'ぼうし',
+      眼鏡: 'めがね',
+      時計: 'とけい',
+      鞄: 'かばん',
+
       // Colors
-      '色': 'いろ', '赤': 'あか', '青': 'あお', '緑': 'みどり', '黄': 'き', '黒': 'くろ', '白': 'しろ', '茶': 'ちゃ',
-      '紫': 'むらさき', 'ピンク': 'ピンク', 'オレンジ': 'オレンジ', 'グレー': 'グレー',
-      
+      色: 'いろ',
+      赤: 'あか',
+      青: 'あお',
+      緑: 'みどり',
+      黄: 'き',
+      黒: 'くろ',
+      白: 'しろ',
+      茶: 'ちゃ',
+      紫: 'むらさき',
+      ピンク: 'ピンク',
+      オレンジ: 'オレンジ',
+      グレー: 'グレー',
+
       // Common verbs
-      '言': 'い', '話': 'はなし', '聞': 'き', '見': 'み', '読': 'よ', '書': 'か', '学': 'まな', '教': 'おし',
-      '行': 'い', '来': 'き', '帰': 'かえ', '出': 'で', '入': 'はい', '立': 'た', '座': 'すわ', '歩': 'ある',
-      '走': 'はし', '飛': 'と', '泳': 'およ', '買': 'か', '売': 'う', '作': 'つく', '使': 'つか',
-      '食': 'た', '飲': 'の', '寝': 'ね', '起': 'お', '働': 'はたら', '遊': 'あそ', '休': 'やす',
-      '習': 'なら', '覚': 'おぼ', '忘': 'わす', '知': 'し', '分': 'わ', '考': 'かんが', '思': 'おも',
-      '感': 'かん', '愛': 'あい', '好': 'す', '嫌': 'きら', '嬉': 'うれ', '悲': 'かな', '怒': 'おこ',
-      '驚': 'おどろ', '怖': 'こわ', '心配': 'しんぱい', '安心': 'あんしん', '困': 'こま',
-      
+      言: 'い',
+      話: 'はなし',
+      聞: 'き',
+      見: 'み',
+      読: 'よ',
+      書: 'か',
+      学: 'まな',
+      教: 'おし',
+      行: 'い',
+      来: 'き',
+      帰: 'かえ',
+      出: 'で',
+      入: 'はい',
+      立: 'た',
+      座: 'すわ',
+      歩: 'ある',
+      走: 'はし',
+      飛: 'と',
+      泳: 'およ',
+      買: 'か',
+      売: 'う',
+      作: 'つく',
+      使: 'つか',
+      食: 'た',
+      飲: 'の',
+      寝: 'ね',
+      起: 'お',
+      働: 'はたら',
+      遊: 'あそ',
+      休: 'やす',
+      習: 'なら',
+      覚: 'おぼ',
+      忘: 'わす',
+      知: 'し',
+      分: 'わ',
+      考: 'かんが',
+      思: 'おも',
+      感: 'かん',
+      愛: 'あい',
+      好: 'す',
+      嫌: 'きら',
+      嬉: 'うれ',
+      悲: 'かな',
+      怒: 'おこ',
+      驚: 'おどろ',
+      怖: 'こわ',
+      心配: 'しんぱい',
+      安心: 'あんしん',
+      困: 'こま',
+
       // Academic and professional terms
-      '批判': 'ひはん', '反対': 'はんたい', '支持': 'しじ', '賛成': 'さんせい', '意見': 'いけん', '考え': 'かんがえ',
-      '問題': 'もんだい', '解決': 'かいけつ', '方法': 'ほうほう', '計画': 'けいかく', '目標': 'もくひょう',
-      '結果': 'けっか', '原因': 'げんいん', '理由': 'りゆう', '目的': 'もくてき', '意味': 'いみ',
-      '内容': 'ないよう', '情報': 'じょうほう', 'データ': 'データ', '研究': 'けんきゅう', '調査': 'ちょうさ',
-      '報告': 'ほうこく', '発表': 'はっぴょう', '説明': 'せつめい', '質問': 'しつもん', '回答': 'かいとう',
-      
+      批判: 'ひはん',
+      反対: 'はんたい',
+      支持: 'しじ',
+      賛成: 'さんせい',
+      意見: 'いけん',
+      考え: 'かんがえ',
+      問題: 'もんだい',
+      解決: 'かいけつ',
+      方法: 'ほうほう',
+      計画: 'けいかく',
+      目標: 'もくひょう',
+      結果: 'けっか',
+      原因: 'げんいん',
+      理由: 'りゆう',
+      目的: 'もくてき',
+      意味: 'いみ',
+      内容: 'ないよう',
+      情報: 'じょうほう',
+      データ: 'データ',
+      研究: 'けんきゅう',
+      調査: 'ちょうさ',
+      報告: 'ほうこく',
+      発表: 'はっぴょう',
+      説明: 'せつめい',
+      質問: 'しつもん',
+      回答: 'かいとう',
+
       // Politics and society
-      '政治': 'せいじ', '政府': 'せいふ', '大統領': 'だいとうりょう', '首相': 'しゅしょう', '大臣': 'だいじん',
-      '国会': 'こっかい', '選挙': 'せんきょ', '投票': 'とうひょう', '法律': 'ほうりつ', '規則': 'きそく',
-      '社会': 'しゃかい', '経済': 'けいざい', '文化': 'ぶんか', '歴史': 'れきし', '伝統': 'でんとう',
-      '国際': 'こくさい', '外交': 'がいこう', '平和': 'へいわ', '戦争': 'せんそう', '環境': 'かんきょう',
-      
+      政治: 'せいじ',
+      政府: 'せいふ',
+      大統領: 'だいとうりょう',
+      首相: 'しゅしょう',
+      大臣: 'だいじん',
+      国会: 'こっかい',
+      選挙: 'せんきょ',
+      投票: 'とうひょう',
+      法律: 'ほうりつ',
+      規則: 'きそく',
+      社会: 'しゃかい',
+      経済: 'けいざい',
+      文化: 'ぶんか',
+      歴史: 'れきし',
+      伝統: 'でんとう',
+      国際: 'こくさい',
+      外交: 'がいこう',
+      平和: 'へいわ',
+      戦争: 'せんそう',
+      環境: 'かんきょう',
+
       // Technology and modern life
-      '技術': 'ぎじゅつ', '科学': 'かがく', '発明': 'はつめい', '発見': 'はっけん', '開発': 'かいはつ',
-      'インターネット': 'インターネット', 'ウェブサイト': 'ウェブサイト', 'アプリ': 'アプリ', 'ソフトウェア': 'ソフトウェア',
-      'スマートフォン': 'スマートフォン', 'タブレット': 'タブレット', 'メール': 'メール', 'メッセージ': 'メッセージ',
-      
+      技術: 'ぎじゅつ',
+      科学: 'かがく',
+      発明: 'はつめい',
+      発見: 'はっけん',
+      開発: 'かいはつ',
+      インターネット: 'インターネット',
+      ウェブサイト: 'ウェブサイト',
+      アプリ: 'アプリ',
+      ソフトウェア: 'ソフトウェア',
+      スマートフォン: 'スマートフォン',
+      タブレット: 'タブレット',
+      メール: 'メール',
+      メッセージ: 'メッセージ',
+
       // Health and medical
-      '健康': 'けんこう', '病気': 'びょうき', '治療': 'ちりょう', '手術': 'しゅじゅつ', '薬': 'くすり',
-      '症状': 'しょうじょう', '診断': 'しんだん', '検査': 'けんさ', '予防': 'よぼう', '回復': 'かいふく',
-      
+      健康: 'けんこう',
+      病気: 'びょうき',
+      治療: 'ちりょう',
+      手術: 'しゅじゅつ',
+      薬: 'くすり',
+      症状: 'しょうじょう',
+      診断: 'しんだん',
+      検査: 'けんさ',
+      予防: 'よぼう',
+      回復: 'かいふく',
+
       // Additional kanji from user's transcript
-      '俺': 'おれ', '凄': 'すご', '判': 'はん', '喜': 'よろこ', '基': 'もと', '変': 'かわ', '奴': 'やつ',
-      '嫌': 'きら', '対': 'たい', '導': 'みちび', '届': 'とど', '常': 'つね', '強': 'つよ', '当': 'とう',
-      '徒': 'と', '得': 'え', '憎': 'にく', '戦': 'たたか', '批': 'ひ', '持': 'も', '敵': 'てき',
-      '新': 'あたら', '晴': 'はれ', '最': 'さい', '望': 'のぞ', '本': 'ほん', '核': 'かく', '構': 'こう',
-      '正': 'ただ', '死': 'し', '殺': 'ころ', '派': 'は', '渡': 'わた', '然': 'ぜん', '理': 'り',
-      '的': 'てき', '目': 'め', '直': 'ちょく', '瞬': 'しゅん', '知': 'し', '硬': 'こう', '神': 'しん',
-      '精': 'せい', '素': 'す', '結': 'けつ', '群': 'ぐん', '者': 'しゃ', '見': 'み', '解': 'かい',
-      '言': 'げん', '話': 'はな', '説': 'せつ', '誰': 'だれ', '識': 'しき', '貴': 'き', '返': 'へん',
-      '送': 'おく', '逆': 'ぎゃく', '通': 'つう', '違': 'ちが', '部': 'ぶ', '間': 'あいだ', '黙': 'だま',
-      
+      俺: 'おれ',
+      凄: 'すご',
+      判: 'はん',
+      喜: 'よろこ',
+      基: 'もと',
+      変: 'かわ',
+      奴: 'やつ',
+      嫌: 'きら',
+      対: 'たい',
+      導: 'みちび',
+      届: 'とど',
+      常: 'つね',
+      強: 'つよ',
+      当: 'とう',
+      徒: 'と',
+      得: 'え',
+      憎: 'にく',
+      戦: 'たたか',
+      批: 'ひ',
+      持: 'も',
+      敵: 'てき',
+      新: 'あたら',
+      晴: 'はれ',
+      最: 'さい',
+      望: 'のぞ',
+      本: 'ほん',
+      核: 'かく',
+      構: 'こう',
+      正: 'ただ',
+      死: 'し',
+      殺: 'ころ',
+      派: 'は',
+      渡: 'わた',
+      然: 'ぜん',
+      理: 'り',
+      的: 'てき',
+      目: 'め',
+      直: 'ちょく',
+      瞬: 'しゅん',
+      知: 'し',
+      硬: 'こう',
+      神: 'しん',
+      精: 'せい',
+      素: 'す',
+      結: 'けつ',
+      群: 'ぐん',
+      者: 'しゃ',
+      見: 'み',
+      解: 'かい',
+      言: 'げん',
+      話: 'はな',
+      説: 'せつ',
+      誰: 'だれ',
+      識: 'しき',
+      貴: 'き',
+      返: 'へん',
+      送: 'おく',
+      逆: 'ぎゃく',
+      通: 'つう',
+      違: 'ちが',
+      部: 'ぶ',
+      間: 'あいだ',
+      黙: 'だま',
+
       // Additional kanji from second transcript
-      '偉': 'い', '姿': 'すがた', '合': 'あ', '彼': 'かれ', '衆': 'しゅう', '際': 'きわ',
-      
+      偉: 'い',
+      姿: 'すがた',
+      合: 'あ',
+      彼: 'かれ',
+      衆: 'しゅう',
+      際: 'きわ',
+
       // Additional kanji from third transcript
-      '伝': 'でん', '光': 'ひかり', '善': 'ぜん', '喋': 'しゃべ', '嬉': 'うれ', '師': 'し',
-      '景': 'けい', '暗': 'あん', '激': 'げき', '耐': 'た', '聞': 'き', '道': 'みち',
-      '郎': 'ろう', '野': 'の', '驚': 'おどろ', '悪': 'わる',
-      
+      伝: 'でん',
+      光: 'ひかり',
+      善: 'ぜん',
+      喋: 'しゃべ',
+      嬉: 'うれ',
+      師: 'し',
+      景: 'けい',
+      暗: 'あん',
+      激: 'げき',
+      耐: 'た',
+      聞: 'き',
+      道: 'みち',
+      郎: 'ろう',
+      野: 'の',
+      驚: 'おどろ',
+      悪: 'わる',
+
       // Compound words from the transcript
-      '全部': 'ぜんぶ', '基本': 'きほん', '全然': 'ぜんぜん', '同じ': 'おなじ', '反対': 'はんたい',
-      '意見': 'いけん', '批判': 'ひはん', '学生': 'がくせい', '強硬': 'きょうこう', '群がる': 'むらがる',
-      '喜ばせる': 'よろこばせる', '説得': 'せっとく', '理解': 'りかい', '正しい': 'ただしい',
-      '常識': 'じょうしき', '基づく': 'もとづく', '戦う': 'たたかう', '愛する': 'あいする',
-      '届く': 'とどく', '素晴らしい': 'すばらしい', '生き方': 'いきかた', '導く': 'みちびく',
-      'プライベート': 'プライベート', '瞬間': 'しゅんかん', '本当': 'ほんとう', '全部': 'ぜんぶ',
-      '高貴': 'こうき', '精神': 'せいしん', '使徒': 'しと', '目的': 'もくてき', '敵': 'てき',
-      '憎む': 'にくむ', '最高': 'さいこう', '望む': 'のぞむ', '意見': 'いけん', '違う': 'ちがう',
-      '大嫌い': 'だいきらい', '説得': 'せっとく', '最新': 'さいしん', 'ニュース': 'ニュース',
-      'トップ': 'トップ', 'ストーリー': 'ストーリー', 'アプリ': 'アプリ', 'チェック': 'チェック',
-      'チャンネル': 'チャンネル', 'ライブ': 'ライブ',
-      
+      全部: 'ぜんぶ',
+      基本: 'きほん',
+      全然: 'ぜんぜん',
+      同じ: 'おなじ',
+      反対: 'はんたい',
+      意見: 'いけん',
+      批判: 'ひはん',
+      学生: 'がくせい',
+      強硬: 'きょうこう',
+      群がる: 'むらがる',
+      喜ばせる: 'よろこばせる',
+      説得: 'せっとく',
+      理解: 'りかい',
+      正しい: 'ただしい',
+      常識: 'じょうしき',
+      基づく: 'もとづく',
+      戦う: 'たたかう',
+      愛する: 'あいする',
+      届く: 'とどく',
+      素晴らしい: 'すばらしい',
+      生き方: 'いきかた',
+      導く: 'みちびく',
+      プライベート: 'プライベート',
+      瞬間: 'しゅんかん',
+      本当: 'ほんとう',
+      全部: 'ぜんぶ',
+      高貴: 'こうき',
+      精神: 'せいしん',
+      使徒: 'しと',
+      目的: 'もくてき',
+      敵: 'てき',
+      憎む: 'にくむ',
+      最高: 'さいこう',
+      望む: 'のぞむ',
+      意見: 'いけん',
+      違う: 'ちがう',
+      大嫌い: 'だいきらい',
+      説得: 'せっとく',
+      最新: 'さいしん',
+      ニュース: 'ニュース',
+      トップ: 'トップ',
+      ストーリー: 'ストーリー',
+      アプリ: 'アプリ',
+      チェック: 'チェック',
+      チャンネル: 'チャンネル',
+      ライブ: 'ライブ',
+
       // Additional compound words from second transcript
-      '人間': 'にんげん', '信じる': 'しんじる', '本当': 'ほんとう', '群衆': 'ぐんしゅう',
-      'めちゃくちゃ': 'めちゃくちゃ', '間違いなく': 'まちがいなく', '間際': 'まぎわ',
-      '偉大': 'いだい', '合う': 'あう', '話しかける': 'はなしかける', 'グループ': 'グループ',
-      'または': 'または', 'アプリ': 'アプリ',
-      
+      人間: 'にんげん',
+      信じる: 'しんじる',
+      本当: 'ほんとう',
+      群衆: 'ぐんしゅう',
+      めちゃくちゃ: 'めちゃくちゃ',
+      間違いなく: 'まちがいなく',
+      間際: 'まぎわ',
+      偉大: 'いだい',
+      合う: 'あう',
+      話しかける: 'はなしかける',
+      グループ: 'グループ',
+      または: 'または',
+      アプリ: 'アプリ',
+
       // Additional compound words from third transcript
-      '暗殺': 'あんさつ', '激しい': 'はげしい', '光景': 'こうけい', '伝道師': 'でんどうし',
-      '最善': 'さいぜん', '喋る': 'しゃべる', '嬉しい': 'うれしい', '悪い': 'わるい',
-      '耐える': 'たえる', '驚く': 'おどろく', '野郎': 'やろう', '師匠': 'ししょう',
-      '光': 'ひかり', '景色': 'けしき', '暗い': 'くらい', '激怒': 'げきど',
-      '忍耐': 'にんたい', '聞く': 'きく', '道路': 'どうろ', '驚愕': 'きょうがく',
-      '悪意': 'あくい', '善悪': 'ぜんあく', '伝える': 'つたえる', '伝統': 'でんとう',
-      '光る': 'ひかる', '光線': 'こうせん', '善良': 'ぜんりょう', '善行': 'ぜんこう',
-      '喋り': 'しゃべり', '嬉しさ': 'うれしさ', '師事': 'しじ', '教師': 'きょうし',
-      '風景': 'ふうけい', '暗黒': 'あんこく', '激化': 'げきか', '激戦': 'げきせん',
-      '耐性': 'たいせい', '聞こえる': 'きこえる', '聞き取る': 'ききとる', '道筋': 'みちすじ',
-      '野心的': 'やしんてき', '野球': 'やきゅう', '驚異': 'きょうい', '驚嘆': 'きょうたん',
-      '悪魔': 'あくま', '悪化': 'あっか', '悪夢': 'あくむ', '悪影響': 'あくえいきょう',
-      
+      暗殺: 'あんさつ',
+      激しい: 'はげしい',
+      光景: 'こうけい',
+      伝道師: 'でんどうし',
+      最善: 'さいぜん',
+      喋る: 'しゃべる',
+      嬉しい: 'うれしい',
+      悪い: 'わるい',
+      耐える: 'たえる',
+      驚く: 'おどろく',
+      野郎: 'やろう',
+      師匠: 'ししょう',
+      光: 'ひかり',
+      景色: 'けしき',
+      暗い: 'くらい',
+      激怒: 'げきど',
+      忍耐: 'にんたい',
+      聞く: 'きく',
+      道路: 'どうろ',
+      驚愕: 'きょうがく',
+      悪意: 'あくい',
+      善悪: 'ぜんあく',
+      伝える: 'つたえる',
+      伝統: 'でんとう',
+      光る: 'ひかる',
+      光線: 'こうせん',
+      善良: 'ぜんりょう',
+      善行: 'ぜんこう',
+      喋り: 'しゃべり',
+      嬉しさ: 'うれしさ',
+      師事: 'しじ',
+      教師: 'きょうし',
+      風景: 'ふうけい',
+      暗黒: 'あんこく',
+      激化: 'げきか',
+      激戦: 'げきせん',
+      耐性: 'たいせい',
+      聞こえる: 'きこえる',
+      聞き取る: 'ききとる',
+      道筋: 'みちすじ',
+      野心的: 'やしんてき',
+      野球: 'やきゅう',
+      驚異: 'きょうい',
+      驚嘆: 'きょうたん',
+      悪魔: 'あくま',
+      悪化: 'あっか',
+      悪夢: 'あくむ',
+      悪影響: 'あくえいきょう',
+
       // Additional common kanji for comprehensive coverage
-      '会': 'かい', '場': 'ば', '所': 'しょ', '地': 'ち', '市': 'し', '県': 'けん', '州': 'しゅう',
-      '区': 'く', '町': 'まち', '村': 'むら', '国': 'くに', '都': 'と', '府': 'ふ', '県': 'けん',
-      '街': 'まち', '路': 'ろ', '道': 'みち', '橋': 'はし', '駅': 'えき', '港': 'みなと', '空港': 'くうこう',
-      '学校': 'がっこう', '大学': 'だいがく', '高校': 'こうこう', '中学': 'ちゅうがく', '小学校': 'しょうがっこう',
-      '病院': 'びょういん', '診療所': 'しんりょうしょ', '薬局': 'やっきょく', '銀行': 'ぎんこう',
-      '郵便局': 'ゆうびんきょく', '役所': 'やくしょ', '警察署': 'けいさつしょ', '消防署': 'しょうぼうしょ',
-      '図書館': 'としょかん', '博物館': 'はくぶつかん', '美術館': 'びじゅつかん', '映画館': 'えいがかん',
-      '劇場': 'げきじょう', 'コンサート': 'コンサート', 'ホール': 'ホール', 'スタジアム': 'スタジアム',
-      '公園': 'こうえん', '遊園地': 'ゆうえんち', '動物園': 'どうぶつえん', '水族館': 'すいぞくかん',
-      '店': 'みせ', '商店': 'しょうてん', 'デパート': 'デパート', 'スーパー': 'スーパー',
-      'コンビニ': 'コンビニ', 'レストラン': 'レストラン', 'カフェ': 'カフェ', 'バー': 'バー',
-      'ホテル': 'ホテル', '旅館': 'りょかん', '民宿': 'みんしゅく', 'アパート': 'アパート',
-      'マンション': 'マンション', '寮': 'りょう', '宿舎': 'しゅくしゃ',
-      
+      会: 'かい',
+      場: 'ば',
+      所: 'しょ',
+      地: 'ち',
+      市: 'し',
+      県: 'けん',
+      州: 'しゅう',
+      区: 'く',
+      町: 'まち',
+      村: 'むら',
+      国: 'くに',
+      都: 'と',
+      府: 'ふ',
+      県: 'けん',
+      街: 'まち',
+      路: 'ろ',
+      道: 'みち',
+      橋: 'はし',
+      駅: 'えき',
+      港: 'みなと',
+      空港: 'くうこう',
+      学校: 'がっこう',
+      大学: 'だいがく',
+      高校: 'こうこう',
+      中学: 'ちゅうがく',
+      小学校: 'しょうがっこう',
+      病院: 'びょういん',
+      診療所: 'しんりょうしょ',
+      薬局: 'やっきょく',
+      銀行: 'ぎんこう',
+      郵便局: 'ゆうびんきょく',
+      役所: 'やくしょ',
+      警察署: 'けいさつしょ',
+      消防署: 'しょうぼうしょ',
+      図書館: 'としょかん',
+      博物館: 'はくぶつかん',
+      美術館: 'びじゅつかん',
+      映画館: 'えいがかん',
+      劇場: 'げきじょう',
+      コンサート: 'コンサート',
+      ホール: 'ホール',
+      スタジアム: 'スタジアム',
+      公園: 'こうえん',
+      遊園地: 'ゆうえんち',
+      動物園: 'どうぶつえん',
+      水族館: 'すいぞくかん',
+      店: 'みせ',
+      商店: 'しょうてん',
+      デパート: 'デパート',
+      スーパー: 'スーパー',
+      コンビニ: 'コンビニ',
+      レストラン: 'レストラン',
+      カフェ: 'カフェ',
+      バー: 'バー',
+      ホテル: 'ホテル',
+      旅館: 'りょかん',
+      民宿: 'みんしゅく',
+      アパート: 'アパート',
+      マンション: 'マンション',
+      寮: 'りょう',
+      宿舎: 'しゅくしゃ',
+
       // Transportation
-      '電車': 'でんしゃ', '地下鉄': 'ちかてつ', 'バス': 'バス', 'タクシー': 'タクシー',
-      '自転車': 'じてんしゃ', 'バイク': 'バイク', '車': 'くるま', 'トラック': 'トラック',
-      '飛行機': 'ひこうき', 'ヘリコプター': 'ヘリコプター', '船': 'ふね', 'ボート': 'ボート',
-      'フェリー': 'フェリー', 'クルーズ': 'クルーズ', '新幹線': 'しんかんせん',
-      '特急': 'とっきゅう', '急行': 'きゅうこう', '普通': 'ふつう', '各駅': 'かくえき',
-      
+      電車: 'でんしゃ',
+      地下鉄: 'ちかてつ',
+      バス: 'バス',
+      タクシー: 'タクシー',
+      自転車: 'じてんしゃ',
+      バイク: 'バイク',
+      車: 'くるま',
+      トラック: 'トラック',
+      飛行機: 'ひこうき',
+      ヘリコプター: 'ヘリコプター',
+      船: 'ふね',
+      ボート: 'ボート',
+      フェリー: 'フェリー',
+      クルーズ: 'クルーズ',
+      新幹線: 'しんかんせん',
+      特急: 'とっきゅう',
+      急行: 'きゅうこう',
+      普通: 'ふつう',
+      各駅: 'かくえき',
+
       // Technology and media
-      'パソコン': 'パソコン', 'スマホ': 'スマホ', 'タブレット': 'タブレット', 'ゲーム': 'ゲーム',
-      'ソフト': 'ソフト', 'アプリ': 'アプリ', 'ウェブ': 'ウェブ', 'サイト': 'サイト',
-      'ブログ': 'ブログ', 'SNS': 'SNS', 'ツイッター': 'ツイッター', 'フェイスブック': 'フェイスブック',
-      'インスタ': 'インスタ', 'ユーチューブ': 'ユーチューブ', 'ネット': 'ネット',
-      'メール': 'メール', 'チャット': 'チャット', 'ビデオ': 'ビデオ', '動画': 'どうが',
-      '写真': 'しゃしん', '画像': 'がぞう', '音声': 'おんせい', '音楽': 'おんがく',
-      '映画': 'えいが', 'ドラマ': 'ドラマ', 'アニメ': 'アニメ', '番組': 'ばんぐみ',
-      'ニュース': 'ニュース', '天気': 'てんき', '予報': 'よほう', '放送': 'ほうそう',
-      'ラジオ': 'ラジオ', 'テレビ': 'テレビ', '番組': 'ばんぐみ', 'チャンネル': 'チャンネル',
-      
+      パソコン: 'パソコン',
+      スマホ: 'スマホ',
+      タブレット: 'タブレット',
+      ゲーム: 'ゲーム',
+      ソフト: 'ソフト',
+      アプリ: 'アプリ',
+      ウェブ: 'ウェブ',
+      サイト: 'サイト',
+      ブログ: 'ブログ',
+      SNS: 'SNS',
+      ツイッター: 'ツイッター',
+      フェイスブック: 'フェイスブック',
+      インスタ: 'インスタ',
+      ユーチューブ: 'ユーチューブ',
+      ネット: 'ネット',
+      メール: 'メール',
+      チャット: 'チャット',
+      ビデオ: 'ビデオ',
+      動画: 'どうが',
+      写真: 'しゃしん',
+      画像: 'がぞう',
+      音声: 'おんせい',
+      音楽: 'おんがく',
+      映画: 'えいが',
+      ドラマ: 'ドラマ',
+      アニメ: 'アニメ',
+      番組: 'ばんぐみ',
+      ニュース: 'ニュース',
+      天気: 'てんき',
+      予報: 'よほう',
+      放送: 'ほうそう',
+      ラジオ: 'ラジオ',
+      テレビ: 'テレビ',
+      番組: 'ばんぐみ',
+      チャンネル: 'チャンネル',
+
       // Business and work
-      '仕事': 'しごと', '会社': 'かいしゃ', '企業': 'きぎょう', '工場': 'こうじょう',
-      '事務所': 'じむしょ', 'オフィス': 'オフィス', '会議': 'かいぎ', '会議室': 'かいぎしつ',
-      '会議': 'かいぎ', '打ち合わせ': 'うちあわせ', 'ミーティング': 'ミーティング',
-      'プロジェクト': 'プロジェクト', '計画': 'けいかく', '予算': 'よさん', '費用': 'ひよう',
-      '価格': 'かかく', '値段': 'ねだん', '料金': 'りょうきん', '税金': 'ぜいきん',
-      '給料': 'きゅうりょう', '給与': 'きゅうよ', 'ボーナス': 'ボーナス', '年金': 'ねんきん',
-      '保険': 'ほけん', '契約': 'けいやく', '契約書': 'けいやくしょ', '合意': 'ごうい',
-      '交渉': 'こうしょう', '取引': 'とりひき', '商談': 'しょうだん', '営業': 'えいぎょう',
-      '販売': 'はんばい', '購入': 'こうにゅう', '注文': 'ちゅうもん', '発注': 'はっちゅう',
-      '配送': 'はいそう', '配達': 'はいたつ', '在庫': 'ざいこ', '商品': 'しょうひん',
-      '製品': 'せいひん', 'サービス': 'サービス', '品質': 'ひんしつ', '管理': 'かんり',
-      '監督': 'かんとく', '責任': 'せきにん', '義務': 'ぎむ', '権利': 'けんり',
-      
+      仕事: 'しごと',
+      会社: 'かいしゃ',
+      企業: 'きぎょう',
+      工場: 'こうじょう',
+      事務所: 'じむしょ',
+      オフィス: 'オフィス',
+      会議: 'かいぎ',
+      会議室: 'かいぎしつ',
+      会議: 'かいぎ',
+      打ち合わせ: 'うちあわせ',
+      ミーティング: 'ミーティング',
+      プロジェクト: 'プロジェクト',
+      計画: 'けいかく',
+      予算: 'よさん',
+      費用: 'ひよう',
+      価格: 'かかく',
+      値段: 'ねだん',
+      料金: 'りょうきん',
+      税金: 'ぜいきん',
+      給料: 'きゅうりょう',
+      給与: 'きゅうよ',
+      ボーナス: 'ボーナス',
+      年金: 'ねんきん',
+      保険: 'ほけん',
+      契約: 'けいやく',
+      契約書: 'けいやくしょ',
+      合意: 'ごうい',
+      交渉: 'こうしょう',
+      取引: 'とりひき',
+      商談: 'しょうだん',
+      営業: 'えいぎょう',
+      販売: 'はんばい',
+      購入: 'こうにゅう',
+      注文: 'ちゅうもん',
+      発注: 'はっちゅう',
+      配送: 'はいそう',
+      配達: 'はいたつ',
+      在庫: 'ざいこ',
+      商品: 'しょうひん',
+      製品: 'せいひん',
+      サービス: 'サービス',
+      品質: 'ひんしつ',
+      管理: 'かんり',
+      監督: 'かんとく',
+      責任: 'せきにん',
+      義務: 'ぎむ',
+      権利: 'けんり',
+
       // Education and learning
-      '教育': 'きょういく', '学習': 'がくしゅう', '勉強': 'べんきょう', '研究': 'けんきゅう',
-      '調査': 'ちょうさ', '実験': 'じっけん', 'テスト': 'テスト', '試験': 'しけん',
-      '問題': 'もんだい', '解答': 'かいとう', '答え': 'こたえ', '結果': 'けっか',
-      '成績': 'せいせき', '評価': 'ひょうか', '評判': 'ひょうばん', '評価': 'ひょうか',
-      '授業': 'じゅぎょう', '講義': 'こうぎ', '講座': 'こうざ', 'セミナー': 'セミナー',
-      'ワークショップ': 'ワークショップ', '研修': 'けんしゅう', 'トレーニング': 'トレーニング',
-      '練習': 'れんしゅう', '訓練': 'くんれん', '指導': 'しどう', 'アドバイス': 'アドバイス',
-      '助言': 'じょげん', '提案': 'ていあん', '改善': 'かいぜん', '向上': 'こうじょう',
-      '進歩': 'しんぽ', '発展': 'はってん', '成長': 'せいちょう', '発達': 'はったつ',
-      
+      教育: 'きょういく',
+      学習: 'がくしゅう',
+      勉強: 'べんきょう',
+      研究: 'けんきゅう',
+      調査: 'ちょうさ',
+      実験: 'じっけん',
+      テスト: 'テスト',
+      試験: 'しけん',
+      問題: 'もんだい',
+      解答: 'かいとう',
+      答え: 'こたえ',
+      結果: 'けっか',
+      成績: 'せいせき',
+      評価: 'ひょうか',
+      評判: 'ひょうばん',
+      評価: 'ひょうか',
+      授業: 'じゅぎょう',
+      講義: 'こうぎ',
+      講座: 'こうざ',
+      セミナー: 'セミナー',
+      ワークショップ: 'ワークショップ',
+      研修: 'けんしゅう',
+      トレーニング: 'トレーニング',
+      練習: 'れんしゅう',
+      訓練: 'くんれん',
+      指導: 'しどう',
+      アドバイス: 'アドバイス',
+      助言: 'じょげん',
+      提案: 'ていあん',
+      改善: 'かいぜん',
+      向上: 'こうじょう',
+      進歩: 'しんぽ',
+      発展: 'はってん',
+      成長: 'せいちょう',
+      発達: 'はったつ',
+
       // Health and medical
-      '健康': 'けんこう', '病気': 'びょうき', '症状': 'しょうじょう', '治療': 'ちりょう',
-      '手術': 'しゅじゅつ', '薬': 'くすり', '処方': 'しょほう', '診断': 'しんだん',
-      '検査': 'けんさ', '診察': 'しんさつ', '診療': 'しんりょう', '入院': 'にゅういん',
-      '退院': 'たいいん', '通院': 'つういん', '通院': 'つういん', '予防': 'よぼう',
-      '回復': 'かいふく', '治癒': 'ちゆ', '完治': 'かんち', '改善': 'かいぜん',
-      '医師': 'いし', '看護師': 'かんごし', '患者': 'かんじゃ', '家族': 'かぞく',
-      '緊急': 'きんきゅう', '救急': 'きゅうきゅう', '応急': 'おうきゅう', '応急処置': 'おうきゅうしょち',
-      
+      健康: 'けんこう',
+      病気: 'びょうき',
+      症状: 'しょうじょう',
+      治療: 'ちりょう',
+      手術: 'しゅじゅつ',
+      薬: 'くすり',
+      処方: 'しょほう',
+      診断: 'しんだん',
+      検査: 'けんさ',
+      診察: 'しんさつ',
+      診療: 'しんりょう',
+      入院: 'にゅういん',
+      退院: 'たいいん',
+      通院: 'つういん',
+      通院: 'つういん',
+      予防: 'よぼう',
+      回復: 'かいふく',
+      治癒: 'ちゆ',
+      完治: 'かんち',
+      改善: 'かいぜん',
+      医師: 'いし',
+      看護師: 'かんごし',
+      患者: 'かんじゃ',
+      家族: 'かぞく',
+      緊急: 'きんきゅう',
+      救急: 'きゅうきゅう',
+      応急: 'おうきゅう',
+      応急処置: 'おうきゅうしょち',
+
       // Food and dining
-      '食べ物': 'たべもの', '飲み物': 'のみもの', '料理': 'りょうり', '食事': 'しょくじ',
-      '朝食': 'ちょうしょく', '昼食': 'ちゅうしょく', '夕食': 'ゆうしょく', '弁当': 'べんとう',
-      'お弁当': 'おべんとう', 'ランチ': 'ランチ', 'ディナー': 'ディナー', 'メニュー': 'メニュー',
-      '注文': 'ちゅうもん', '料理人': 'りょうりにん', 'シェフ': 'シェフ', 'レシピ': 'レシピ',
-      '材料': 'ざいりょう', '食材': 'しょくざい', '調味料': 'ちょうみりょう', '味': 'あじ',
-      '甘い': 'あまい', '辛い': 'からい', '酸っぱい': 'すっぱい', '苦い': 'にがい',
-      '塩辛い': 'しおからい', '美味しい': 'おいしい', '不味い': 'まずい', '熱い': 'あつい',
-      '冷たい': 'つめたい', '温かい': 'あたたかい', '冷める': 'さめる', '冷やす': 'ひやす',
-      
+      食べ物: 'たべもの',
+      飲み物: 'のみもの',
+      料理: 'りょうり',
+      食事: 'しょくじ',
+      朝食: 'ちょうしょく',
+      昼食: 'ちゅうしょく',
+      夕食: 'ゆうしょく',
+      弁当: 'べんとう',
+      お弁当: 'おべんとう',
+      ランチ: 'ランチ',
+      ディナー: 'ディナー',
+      メニュー: 'メニュー',
+      注文: 'ちゅうもん',
+      料理人: 'りょうりにん',
+      シェフ: 'シェフ',
+      レシピ: 'レシピ',
+      材料: 'ざいりょう',
+      食材: 'しょくざい',
+      調味料: 'ちょうみりょう',
+      味: 'あじ',
+      甘い: 'あまい',
+      辛い: 'からい',
+      酸っぱい: 'すっぱい',
+      苦い: 'にがい',
+      塩辛い: 'しおからい',
+      美味しい: 'おいしい',
+      不味い: 'まずい',
+      熱い: 'あつい',
+      冷たい: 'つめたい',
+      温かい: 'あたたかい',
+      冷める: 'さめる',
+      冷やす: 'ひやす',
+
       // Weather and seasons
-      '天気': 'てんき', '気候': 'きこう', '季節': 'きせつ', '春': 'はる', '夏': 'なつ',
-      '秋': 'あき', '冬': 'ふゆ', '暖かい': 'あたたかい', '暑い': 'あつい', '涼しい': 'すずしい',
-      '寒い': 'さむい', '曇り': 'くもり', '晴れ': 'はれ', '雨': 'あめ', '雪': 'ゆき',
-      '風': 'かぜ', '台風': 'たいふう', '嵐': 'あらし', '雷': 'かみなり', '虹': 'にじ',
-      '湿度': 'しつど', '気温': 'きおん', '温度': 'おんど', '気圧': 'きあつ', '予報': 'よほう',
-      
+      天気: 'てんき',
+      気候: 'きこう',
+      季節: 'きせつ',
+      春: 'はる',
+      夏: 'なつ',
+      秋: 'あき',
+      冬: 'ふゆ',
+      暖かい: 'あたたかい',
+      暑い: 'あつい',
+      涼しい: 'すずしい',
+      寒い: 'さむい',
+      曇り: 'くもり',
+      晴れ: 'はれ',
+      雨: 'あめ',
+      雪: 'ゆき',
+      風: 'かぜ',
+      台風: 'たいふう',
+      嵐: 'あらし',
+      雷: 'かみなり',
+      虹: 'にじ',
+      湿度: 'しつど',
+      気温: 'きおん',
+      温度: 'おんど',
+      気圧: 'きあつ',
+      予報: 'よほう',
+
       // Sports and recreation
-      'スポーツ': 'スポーツ', '運動': 'うんどう', '練習': 'れんしゅう', '試合': 'しあい',
-      '競技': 'きょうぎ', '大会': 'たいかい', '選手': 'せんしゅ', '監督': 'かんとく',
-      'コーチ': 'コーチ', 'チーム': 'チーム', 'サッカー': 'サッカー', '野球': 'やきゅう',
-      'テニス': 'テニス', 'バスケット': 'バスケット', 'バレーボール': 'バレーボール',
-      '水泳': 'すいえい', 'マラソン': 'マラソン', 'ゴルフ': 'ゴルフ', 'スキー': 'スキー',
-      'スノーボード': 'スノーボード', '登山': 'とざん', '釣り': 'つり', 'キャンプ': 'キャンプ',
-      '旅行': 'りょこう', '観光': 'かんこう', '観光地': 'かんこうち', '名所': 'めいしょ',
-      '名物': 'めいぶつ', 'お土産': 'おみやげ', '記念品': 'きねんひん', '写真': 'しゃしん',
-      
+      スポーツ: 'スポーツ',
+      運動: 'うんどう',
+      練習: 'れんしゅう',
+      試合: 'しあい',
+      競技: 'きょうぎ',
+      大会: 'たいかい',
+      選手: 'せんしゅ',
+      監督: 'かんとく',
+      コーチ: 'コーチ',
+      チーム: 'チーム',
+      サッカー: 'サッカー',
+      野球: 'やきゅう',
+      テニス: 'テニス',
+      バスケット: 'バスケット',
+      バレーボール: 'バレーボール',
+      水泳: 'すいえい',
+      マラソン: 'マラソン',
+      ゴルフ: 'ゴルフ',
+      スキー: 'スキー',
+      スノーボード: 'スノーボード',
+      登山: 'とざん',
+      釣り: 'つり',
+      キャンプ: 'キャンプ',
+      旅行: 'りょこう',
+      観光: 'かんこう',
+      観光地: 'かんこうち',
+      名所: 'めいしょ',
+      名物: 'めいぶつ',
+      お土産: 'おみやげ',
+      記念品: 'きねんひん',
+      写真: 'しゃしん',
+
       // Entertainment and culture
-      '娯楽': 'ごらく', '楽しみ': 'たのしみ', '趣味': 'しゅみ', '興味': 'きょうみ',
-      '関心': 'かんしん', '好み': 'このみ', '好き': 'すき', '嫌い': 'きらい',
-      '愛好': 'あいこう', '熱中': 'ねっちゅう', '夢中': 'むちゅう', '集中': 'しゅうちゅう',
-      '注意': 'ちゅうい', '関心': 'かんしん', '注目': 'ちゅうもく', '人気': 'にんき',
-      '評判': 'ひょうばん', '名声': 'めいせい', '名誉': 'めいよ', '栄誉': 'えいよ',
-      '賞': 'しょう', '表彰': 'ひょうしょう', '受賞': 'じゅしょう', '授賞': 'じゅしょう',
-      '芸術': 'げいじゅつ', '美術': 'びじゅつ', '音楽': 'おんがく', '文学': 'ぶんがく',
-      '詩': 'し', '小説': 'しょうせつ', '物語': 'ものがたり', '伝説': 'でんせつ',
-      '歴史': 'れきし', '伝統': 'でんとう', '文化': 'ぶんか', '習慣': 'しゅうかん',
-      '風習': 'ふうしゅう', '祭り': 'まつり', '祝日': 'しゅくじつ', '記念日': 'きねんび',
-      '誕生日': 'たんじょうび', '結婚記念日': 'けっこんきねんび', '記念': 'きねん',
-      
+      娯楽: 'ごらく',
+      楽しみ: 'たのしみ',
+      趣味: 'しゅみ',
+      興味: 'きょうみ',
+      関心: 'かんしん',
+      好み: 'このみ',
+      好き: 'すき',
+      嫌い: 'きらい',
+      愛好: 'あいこう',
+      熱中: 'ねっちゅう',
+      夢中: 'むちゅう',
+      集中: 'しゅうちゅう',
+      注意: 'ちゅうい',
+      関心: 'かんしん',
+      注目: 'ちゅうもく',
+      人気: 'にんき',
+      評判: 'ひょうばん',
+      名声: 'めいせい',
+      名誉: 'めいよ',
+      栄誉: 'えいよ',
+      賞: 'しょう',
+      表彰: 'ひょうしょう',
+      受賞: 'じゅしょう',
+      授賞: 'じゅしょう',
+      芸術: 'げいじゅつ',
+      美術: 'びじゅつ',
+      音楽: 'おんがく',
+      文学: 'ぶんがく',
+      詩: 'し',
+      小説: 'しょうせつ',
+      物語: 'ものがたり',
+      伝説: 'でんせつ',
+      歴史: 'れきし',
+      伝統: 'でんとう',
+      文化: 'ぶんか',
+      習慣: 'しゅうかん',
+      風習: 'ふうしゅう',
+      祭り: 'まつり',
+      祝日: 'しゅくじつ',
+      記念日: 'きねんび',
+      誕生日: 'たんじょうび',
+      結婚記念日: 'けっこんきねんび',
+      記念: 'きねん',
+
       // Emotions and feelings
-      '感情': 'かんじょう', '気持ち': 'きもち', '心': 'こころ', '心配': 'しんぱい',
-      '安心': 'あんしん', '不安': 'ふあん', '緊張': 'きんちょう', 'リラックス': 'リラックス',
-      '興奮': 'こうふん', '感動': 'かんどう', '感激': 'かんげき', '驚き': 'おどろき',
-      '驚く': 'おどろく', 'びっくり': 'びっくり', 'ショック': 'ショック', '衝撃': 'しょうげき',
-      '怒り': 'いかり', '怒る': 'おこる', '憤り': 'いきどおり', '憤慨': 'ふんがい',
-      '悲しみ': 'かなしみ', '悲しい': 'かなしい', '辛い': 'つらい', '苦しい': 'くるしい',
-      '痛い': 'いたい', '痛み': 'いたみ', '苦痛': 'くつう', '苦しみ': 'くるしみ',
-      '喜び': 'よろこび', '嬉しい': 'うれしい', '楽しい': 'たのしい', '愉快': 'ゆかい',
-      '面白い': 'おもしろい', '興味深い': 'きょうみぶかい', '魅力的': 'みりょくてき',
-      '美しい': 'うつくしい', '素晴らしい': 'すばらしい', '素敵': 'すてき', '立派': 'りっぱ',
-      '優しい': 'やさしい', '親切': 'しんせつ', '優雅': 'ゆうが', '上品': 'じょうひん',
-      '愛情': 'あいじょう', '愛': 'あい', '恋': 'こい', '恋愛': 'れんあい',
-      '友情': 'ゆうじょう', '信頼': 'しんらい', '信じる': 'しんじる', '疑う': 'うたがう',
-      '疑い': 'うたがい', '疑惑': 'ぎわく', '不信': 'ふしん', '信頼': 'しんらい',
-      '尊敬': 'そんけい', '敬う': 'うやまう', '感謝': 'かんしゃ', 'ありがとう': 'ありがとう',
-      '謝罪': 'しゃざい', '謝る': 'あやまる', '許す': 'ゆるす', '許し': 'ゆるし',
-      '許容': 'きょよう', '我慢': 'がまん', '忍耐': 'にんたい', '努力': 'どりょく',
-      '頑張る': 'がんばる', '諦める': 'あきらめる', '希望': 'きぼう', '願い': 'ねがい',
-      '夢': 'ゆめ', '目標': 'もくひょう', '理想': 'りそう', '現実': 'げんじつ',
-      '未来': 'みらい', '過去': 'かこ', '現在': 'げんざい', '今日': 'きょう',
-      '明日': 'あした', '昨日': 'きのう', '今': 'いま', '今度': 'こんど',
-      '次': 'つぎ', '前': 'まえ', '後': 'あと', '最初': 'さいしょ', '最後': 'さいご',
-      '始まり': 'はじまり', '終わり': 'おわり', '開始': 'かいし', '終了': 'しゅうりょう',
-      '完了': 'かんりょう', '完成': 'かんせい', '成功': 'せいこう', '失敗': 'しっぱい',
-      '勝利': 'しょうり', '敗北': 'はいぼく', '勝つ': 'かつ', '負ける': 'まける',
-      '優勝': 'ゆうしょう', '準優勝': 'じゅんゆうしょう', '三位': 'さんい', '順位': 'じゅんい'
+      感情: 'かんじょう',
+      気持ち: 'きもち',
+      心: 'こころ',
+      心配: 'しんぱい',
+      安心: 'あんしん',
+      不安: 'ふあん',
+      緊張: 'きんちょう',
+      リラックス: 'リラックス',
+      興奮: 'こうふん',
+      感動: 'かんどう',
+      感激: 'かんげき',
+      驚き: 'おどろき',
+      驚く: 'おどろく',
+      びっくり: 'びっくり',
+      ショック: 'ショック',
+      衝撃: 'しょうげき',
+      怒り: 'いかり',
+      怒る: 'おこる',
+      憤り: 'いきどおり',
+      憤慨: 'ふんがい',
+      悲しみ: 'かなしみ',
+      悲しい: 'かなしい',
+      辛い: 'つらい',
+      苦しい: 'くるしい',
+      痛い: 'いたい',
+      痛み: 'いたみ',
+      苦痛: 'くつう',
+      苦しみ: 'くるしみ',
+      喜び: 'よろこび',
+      嬉しい: 'うれしい',
+      楽しい: 'たのしい',
+      愉快: 'ゆかい',
+      面白い: 'おもしろい',
+      興味深い: 'きょうみぶかい',
+      魅力的: 'みりょくてき',
+      美しい: 'うつくしい',
+      素晴らしい: 'すばらしい',
+      素敵: 'すてき',
+      立派: 'りっぱ',
+      優しい: 'やさしい',
+      親切: 'しんせつ',
+      優雅: 'ゆうが',
+      上品: 'じょうひん',
+      愛情: 'あいじょう',
+      愛: 'あい',
+      恋: 'こい',
+      恋愛: 'れんあい',
+      友情: 'ゆうじょう',
+      信頼: 'しんらい',
+      信じる: 'しんじる',
+      疑う: 'うたがう',
+      疑い: 'うたがい',
+      疑惑: 'ぎわく',
+      不信: 'ふしん',
+      信頼: 'しんらい',
+      尊敬: 'そんけい',
+      敬う: 'うやまう',
+      感謝: 'かんしゃ',
+      ありがとう: 'ありがとう',
+      謝罪: 'しゃざい',
+      謝る: 'あやまる',
+      許す: 'ゆるす',
+      許し: 'ゆるし',
+      許容: 'きょよう',
+      我慢: 'がまん',
+      忍耐: 'にんたい',
+      努力: 'どりょく',
+      頑張る: 'がんばる',
+      諦める: 'あきらめる',
+      希望: 'きぼう',
+      願い: 'ねがい',
+      夢: 'ゆめ',
+      目標: 'もくひょう',
+      理想: 'りそう',
+      現実: 'げんじつ',
+      未来: 'みらい',
+      過去: 'かこ',
+      現在: 'げんざい',
+      今日: 'きょう',
+      明日: 'あした',
+      昨日: 'きのう',
+      今: 'いま',
+      今度: 'こんど',
+      次: 'つぎ',
+      前: 'まえ',
+      後: 'あと',
+      最初: 'さいしょ',
+      最後: 'さいご',
+      始まり: 'はじまり',
+      終わり: 'おわり',
+      開始: 'かいし',
+      終了: 'しゅうりょう',
+      完了: 'かんりょう',
+      完成: 'かんせい',
+      成功: 'せいこう',
+      失敗: 'しっぱい',
+      勝利: 'しょうり',
+      敗北: 'はいぼく',
+      勝つ: 'かつ',
+      負ける: 'まける',
+      優勝: 'ゆうしょう',
+      準優勝: 'じゅんゆうしょう',
+      三位: 'さんい',
+      順位: 'じゅんい'
     };
 
     let result = text;
-    
+
     // Sort by length (longest first) to avoid partial replacements
     const sortedEntries = Object.entries(kanjiReadings).sort((a, b) => b[0].length - a[0].length);
-    
+
     // Replace kanji with furigana
     for (const [kanji, reading] of sortedEntries) {
       const regex = new RegExp(kanji, 'g');
@@ -1688,14 +2849,16 @@ Context (next fragments):
       return `${seg.text || ''}`.trim();
     };
 
-    const prevLines = segments
-      .slice(Math.max(0, index - contextRadius), index)
-      .map(formatPrevContextLine)
-      .join('\n') || '(none)';
-    const nextLines = segments
-      .slice(index + 1, Math.min(segments.length, index + contextRadius + 1))
-      .map(formatNextContextLine)
-      .join('\n') || '(none)';
+    const prevLines =
+      segments
+        .slice(Math.max(0, index - contextRadius), index)
+        .map(formatPrevContextLine)
+        .join('\n') || '(none)';
+    const nextLines =
+      segments
+        .slice(index + 1, Math.min(segments.length, index + contextRadius + 1))
+        .map(formatNextContextLine)
+        .join('\n') || '(none)';
     const currentLine = formatNextContextLine(segment);
 
     // Replace placeholders
@@ -1721,9 +2884,10 @@ Context (next fragments):
   // Build a single-call prompt that includes all segments with time data and asks for JSON output
   function buildGlobalPrompt(segments) {
     const presetStyle = elements.stylePreset.value.replace('-', ' ');
-    const style = elements.stylePreset.value === 'custom'
-      ? (elements.styleText?.value?.trim() || 'custom style provided by the user')
-      : presetStyle;
+    const style =
+      elements.stylePreset.value === 'custom'
+        ? elements.styleText?.value?.trim() || 'custom style provided by the user'
+        : presetStyle;
     const outLang =
       elements.outputLang.value === 'custom'
         ? elements.customLang.value || 'English'
@@ -1735,7 +2899,7 @@ Context (next fragments):
       text: String(seg.text || '')
     }));
 
-    const systemPrompt = `You are rewriting a full closed-caption transcript in a coherent way.
+    const systemPrompt = `You are rewriting a full closed-caption transcript in a coherent way that will be shown alongside the original realtime youtube CC transcription.
 Style: ${style}
 Output language: ${outLang}
 
@@ -1751,14 +2915,117 @@ No markdown fences, no commentary.`;
 
     let userPrompt = `Input segments (JSON):\n${jsonStr}`;
     if (elements.asciiOnly.checked) {
-      userPrompt +=
-        `\n\nIMPORTANT: Use only standard ASCII characters in your response. Avoid accented letters, special punctuation, or Unicode symbols.`;
+      userPrompt += `\n\nIMPORTANT: Use only standard ASCII characters in your response. Avoid accented letters, special punctuation, or Unicode symbols.`;
       if (elements.blocklist.value.trim()) {
         userPrompt += ` Also avoid these specific characters: ${elements.blocklist.value.trim()}`;
       }
     }
 
     return { systemPrompt, userPrompt };
+  }
+
+  function normalizeJsonPayload(payloadText) {
+    let text = String(payloadText ?? '').trim();
+    const fenceMatch = text.match(/```[a-zA-Z]*\n([\s\S]*?)```/);
+    if (fenceMatch) {
+      text = fenceMatch[1].trim();
+    }
+    const firstBrace = text.indexOf('{');
+    if (firstBrace > 0) {
+      text = text.slice(firstBrace);
+    }
+    return text;
+  }
+
+  function parseJsonSegments(payloadText) {
+    const normalized = normalizeJsonPayload(payloadText);
+    let parsed;
+    try {
+      parsed = JSON.parse(normalized);
+    } catch (error) {
+      throw new Error('Model did not return valid JSON');
+    }
+    const segments = Array.isArray(parsed?.segments) ? parsed.segments : [];
+    if (!segments.length) {
+      throw new Error('No segments found in model output');
+    }
+    return segments;
+  }
+
+  function estimateSegmentDuration(segments, index) {
+    const segment = segments[index];
+    const next = segments[index + 1] || null;
+    if (!segment) return 0;
+
+    const explicit = Number(segment.duration);
+    if (Number.isFinite(explicit) && explicit > 0.05) {
+      return explicit;
+    }
+
+    const start = Number(segment.start);
+    const end = Number(segment.end);
+    if (Number.isFinite(start) && Number.isFinite(end) && end > start) {
+      return end - start;
+    }
+
+    if (next) {
+      const nextStart = Number(next.start);
+      if (Number.isFinite(start) && Number.isFinite(nextStart) && nextStart > start) {
+        return nextStart - start;
+      }
+    }
+
+    return 4; // fallback duration estimate in seconds
+  }
+
+  function chunkTranscriptByDuration(segments, maxDurationSeconds = 120) {
+    if (!Array.isArray(segments) || !segments.length) {
+      return [];
+    }
+
+    const chunks = [];
+    let current = [];
+    let currentDuration = 0;
+
+    const pushChunk = () => {
+      if (!current.length) return;
+      const chunkSegments = current.map(entry => entry.segment);
+      const indexes = current.map(entry => entry.index);
+      const startIndex = indexes[0];
+      const endIndex = indexes[indexes.length - 1];
+      const startTime = Number(chunkSegments[0]?.start) || 0;
+      const lastSegment = chunkSegments[chunkSegments.length - 1] || {};
+      const endTime = Number(lastSegment.end);
+      const resolvedEnd = Number.isFinite(endTime) && endTime > startTime ? endTime : startTime + currentDuration;
+
+      chunks.push({
+        startIndex,
+        endIndex,
+        indexes,
+        segments: chunkSegments,
+        duration: currentDuration,
+        startTime,
+        endTime: resolvedEnd
+      });
+    };
+
+    for (let index = 0; index < segments.length; index += 1) {
+      const segment = segments[index];
+      const estDuration = estimateSegmentDuration(segments, index);
+
+      // Start a new chunk if adding this segment would exceed the target duration
+      if (current.length && currentDuration + estDuration > maxDurationSeconds) {
+        pushChunk();
+        current = [];
+        currentDuration = 0;
+      }
+
+      current.push({ segment, index });
+      currentDuration += estDuration;
+    }
+
+    pushChunk();
+    return chunks;
   }
 
   // Background messaging
@@ -1972,91 +3239,116 @@ No markdown fences, no commentary.`;
 
     // Single-call mode: one LLM request for the entire transcript
     if (elements.singleCall && elements.singleCall.checked) {
+      transcriptData.forEach(segment => {
+        delete segment.restyled;
+        delete segment.error;
+      });
+
+      const chunks = chunkTranscriptByDuration(transcriptData, 120);
+      if (!chunks.length) {
+        setError('No transcript segments available for restyling');
+        return;
+      }
+
+      aborter = new AbortController();
+      activeBatchId = `restyle-one-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+      elements.restyleBtn.disabled = true;
+      elements.stopBtn.disabled = false;
+
+      const asciiOnly = elements.asciiOnly.checked;
+      const blocklist = elements.blocklist.value;
+      const totalSegments = transcriptData.length;
+      const started = Date.now();
+
+      setStatus(
+        `Starting chunked restyle (${chunks.length} chunk${chunks.length === 1 ? '' : 's'})...`
+      );
+
+      let processedSegments = 0;
+      let lastChunkIndex = -1;
+
       try {
-        setStatus('Starting single-call restyle...');
+        for (let i = 0; i < chunks.length; i += 1) {
+          if (aborter.signal.aborted) {
+            break;
+          }
 
-        const { systemPrompt, userPrompt } = buildGlobalPrompt(transcriptData);
-        aborter = new AbortController();
-        activeBatchId = `restyle-one-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+          const chunk = chunks[i];
+          lastChunkIndex = i;
+          const chunkStartLabel = formatTime(Math.max(0, chunk.startTime || 0));
+          const chunkEndLabel = formatTime(Math.max(0, chunk.endTime || 0));
+          setStatus(`Restyling chunk ${i + 1}/${chunks.length} (${chunkStartLabel} - ${chunkEndLabel})`);
 
-        const response = await sendMessage('LLM_CALL', {
-          provider: elements.provider.value,
-          baseUrl: elements.baseUrl.value,
-          apiKey: elements.apiKey.value,
-          model: elements.model.value,
-          systemPrompt,
-          userPrompt,
-          asciiOnly: elements.asciiOnly.checked,
-          batchId: activeBatchId,
-          requestId: `${activeBatchId}:0`,
-          anthropicVersion: elements.anthropicVersion.value.trim(),
-          maxTokens: parseInt(elements.maxTokens?.value, 10) || 1000,
-          temperature: parseFloat(elements.temperature?.value) || 0.7
-        });
-
-        if (!response?.success) {
-          throw new Error(response?.error || 'LLM call failed');
-        }
-
-        let payloadText = response.data || '';
-        // Strip markdown fences if present
-        payloadText = String(payloadText).trim();
-        const fenceMatch = payloadText.match(/```[a-zA-Z]*\n([\s\S]*?)```/);
-        if (fenceMatch) {
-          payloadText = fenceMatch[1].trim();
-        }
-        // Attempt to find first JSON object if extra text present
-        const firstBrace = payloadText.indexOf('{');
-        if (firstBrace > 0) {
-          payloadText = payloadText.slice(firstBrace);
-        }
-
-        let parsed;
-        try {
-          parsed = JSON.parse(payloadText);
-        } catch (e) {
-          throw new Error('Model did not return valid JSON');
-        }
-
-        const outSegments = Array.isArray(parsed?.segments) ? parsed.segments : [];
-        if (!outSegments.length) {
-          throw new Error('No segments found in model output');
-        }
-
-        // Map back by index when counts match; otherwise try by time
-        if (outSegments.length === transcriptData.length) {
-          outSegments.forEach((seg, i) => {
-            const text = String(seg.text || '');
-            transcriptData[i].restyled = elements.asciiOnly.checked
-              ? sanitizeAscii(text, elements.blocklist.value)
-              : text;
+          const { systemPrompt, userPrompt } = buildGlobalPrompt(chunk.segments);
+          const response = await sendMessage('LLM_CALL', {
+            provider: elements.provider.value,
+            baseUrl: elements.baseUrl.value,
+            apiKey: elements.apiKey.value,
+            model: elements.model.value,
+            systemPrompt,
+            userPrompt,
+            asciiOnly,
+            batchId: activeBatchId,
+            requestId: `${activeBatchId}:chunk-${i}`,
+            anthropicVersion: elements.anthropicVersion.value.trim(),
+            maxTokens: parseInt(elements.maxTokens?.value, 10) || 1000,
+            temperature: parseFloat(elements.temperature?.value) || 0.7
           });
+
+          if (aborter.signal.aborted || response?.aborted) {
+            break;
+          }
+
+          if (!response?.success) {
+            throw new Error(response?.error || 'LLM call failed');
+          }
+
+          const outSegments = parseJsonSegments(response.data);
+
+          if (outSegments.length === chunk.segments.length) {
+            outSegments.forEach((seg, idx) => {
+              const text = String(seg.text || '');
+              const sanitized = asciiOnly ? sanitizeAscii(text, blocklist) : text;
+              transcriptData[chunk.indexes[idx]].restyled = sanitized;
+            });
+          } else {
+            const key = s => `${Number(s.start) || 0}-${Number(s.end) || 0}`;
+            const map = new Map(outSegments.map(seg => [key(seg), String(seg.text || '')]));
+            chunk.segments.forEach((seg, idx) => {
+              const mapped = map.get(key(seg));
+              if (typeof mapped === 'string') {
+                const sanitized = asciiOnly ? sanitizeAscii(mapped, blocklist) : mapped;
+                transcriptData[chunk.indexes[idx]].restyled = sanitized;
+              }
+            });
+          }
+
+          processedSegments += chunk.indexes.length;
+          elements.progress.textContent = `Chunks ${i + 1}/${chunks.length} | Segments ${processedSegments}/${totalSegments}`;
+          renderList();
+          if (activeSegmentIndex >= 0) {
+            updateSubtitleText(transcriptData[activeSegmentIndex]);
+          }
+        }
+
+        if (aborter.signal.aborted) {
+          setStatus(`Restyle stopped: ${processedSegments}/${totalSegments} segments updated`);
         } else {
-          // Fallback: build a map by start-end seconds
-          const key = s => `${Number(s.start)||0}-${Number(s.end)||0}`;
-          const map = new Map(outSegments.map(s => [key(s), String(s.text || '')]));
-          transcriptData.forEach((s, i) => {
-            const t = map.get(key(s));
-            if (typeof t === 'string') {
-              transcriptData[i].restyled = elements.asciiOnly.checked
-                ? sanitizeAscii(t, elements.blocklist.value)
-                : t;
-            }
-          });
+          const duration = dur(started);
+          setStatus(`Restyle complete: ${processedSegments}/${totalSegments} segments in ${duration}`);
         }
-
-        renderList();
-        updateSubtitleText(transcriptData[activeSegmentIndex] || null);
-        setStatus(`Single-call restyle complete: ${transcriptData.filter(s=>s.restyled).length}/${transcriptData.length} segments updated`);
       } catch (error) {
+        const chunkInfo = lastChunkIndex >= 0 ? ` on chunk ${lastChunkIndex + 1}` : '';
         logError('Single-call restyle failed:', error);
-        setError(`Restyle failed: ${error.message}`);
+        setError(`Restyle failed${chunkInfo}: ${error.message}`);
       } finally {
         elements.restyleBtn.disabled = false;
         elements.stopBtn.disabled = true;
         elements.progress.textContent = '';
         aborter = null;
         activeBatchId = null;
+        renderList();
       }
       return;
     }
@@ -2296,7 +3588,47 @@ No markdown fences, no commentary.`;
       ? 'Disable minimal video pausing'
       : 'Enable minimal video pausing';
     elements.autoTtsGuardBtn.classList.toggle('active', autoTtsInterruptGuardEnabled);
-    elements.autoTtsGuardBtn.setAttribute('aria-pressed', autoTtsInterruptGuardEnabled ? 'true' : 'false');
+    elements.autoTtsGuardBtn.setAttribute(
+      'aria-pressed',
+      autoTtsInterruptGuardEnabled ? 'true' : 'false'
+    );
+  }
+
+  function syncGuardPauseUI() {
+    if (!elements.guardPauseSlider && !elements.guardPauseValue) return;
+
+    const slider = elements.guardPauseSlider;
+    const min = slider ? Number(slider.min) || 0 : 0;
+    const max = slider ? Number(slider.max) || 3000 : 3000;
+    const step = slider ? Number(slider.step) || 50 : 50;
+
+    let normalized = Number.isFinite(guardPauseMs) ? guardPauseMs : min;
+    normalized = Math.max(min, Math.min(max, normalized));
+    if (step > 0) {
+      normalized = Math.round(normalized / step) * step;
+    }
+
+    guardPauseMs = normalized;
+
+    if (slider) {
+      slider.value = String(normalized);
+    }
+
+    if (elements.guardPauseValue) {
+      elements.guardPauseValue.textContent = `${(normalized / 1000).toFixed(1)}s`;
+    }
+  }
+
+  function syncDockToggleUI() {
+    if (!elements.dockToggle) return;
+
+    const isDocked = overlayParked;
+    elements.dockToggle.textContent = isDocked ? '⇱' : '⇲';
+    elements.dockToggle.title = isDocked
+      ? 'Undock overlay back to floating mode'
+      : 'Dock overlay into transcript panel';
+    elements.dockToggle.setAttribute('aria-pressed', overlayDockPreferred ? 'true' : 'false');
+    elements.dockToggle.classList.toggle('active', overlayDockPreferred);
   }
 
   function showStopButton(show) {
@@ -2564,15 +3896,18 @@ No markdown fences, no commentary.`;
       }
 
       // Auto-cleanup audio after 5 minutes to prevent memory leaks
-      elements.ttsAudio._cleanupTimeout = setTimeout(() => {
-        if (elements.ttsAudio && elements.ttsAudio.src) {
-          URL.revokeObjectURL(elements.ttsAudio.src);
-          elements.ttsAudio.src = '';
-          elements.ttsAudio.style.display = 'none';
-          elements.downloadTtsBtn.style.display = 'none';
-          updateStopButtonVisibility();
-        }
-      }, 5 * 60 * 1000);
+      elements.ttsAudio._cleanupTimeout = setTimeout(
+        () => {
+          if (elements.ttsAudio && elements.ttsAudio.src) {
+            URL.revokeObjectURL(elements.ttsAudio.src);
+            elements.ttsAudio.src = '';
+            elements.ttsAudio.style.display = 'none';
+            elements.downloadTtsBtn.style.display = 'none';
+            updateStopButtonVisibility();
+          }
+        },
+        5 * 60 * 1000
+      );
 
       setStatus('TTS audio generated successfully');
       updateStopButtonVisibility();
@@ -2839,6 +4174,21 @@ ${text}
     overlay.remove();
   });
 
+  if (elements.dockToggle) {
+    elements.dockToggle.addEventListener('click', () => {
+      overlayDockPreferred = !overlayDockPreferred;
+      syncDockToggleUI();
+      if (overlayDockPreferred) {
+        setStatus('Docking overlay into transcript panel...');
+        attemptParkOverlay();
+      } else {
+        unparkOverlay();
+        setStatus('Overlay undocked');
+      }
+      savePrefs();
+    });
+  }
+
   // Font size live updates
   if (elements.fontSize) {
     elements.fontSize.addEventListener('input', handleFontSizeChange);
@@ -2851,7 +4201,7 @@ ${text}
       const section = header.closest('.yt-section');
       const content = section.querySelector('.section-content');
       const icon = header.querySelector('.collapse-icon');
-      
+
       if (content.style.display === 'none') {
         content.style.display = 'block';
         icon.textContent = '▼';
@@ -2895,12 +4245,24 @@ ${text}
     });
   }
 
+  if (elements.guardPauseSlider) {
+    elements.guardPauseSlider.addEventListener('input', () => {
+      guardPauseMs = parseInt(elements.guardPauseSlider.value, 10) || 0;
+      syncGuardPauseUI();
+    });
+    elements.guardPauseSlider.addEventListener('change', () => {
+      guardPauseMs = parseInt(elements.guardPauseSlider.value, 10) || 0;
+      syncGuardPauseUI();
+      savePrefs();
+    });
+  }
+
   if (elements.furigana) {
     elements.furigana.addEventListener('change', () => {
       savePrefs();
       // Re-render transcript with furigana
       if (transcriptData && transcriptData.length > 0) {
-        renderTranscript(transcriptData);
+        renderList(transcriptData, elements.searchInput?.value || '');
       }
       setStatus(`Furigana ${elements.furigana.checked ? 'enabled' : 'disabled'}`);
     });
@@ -2909,7 +4271,22 @@ ${text}
   if (elements.showBoth) {
     elements.showBoth.addEventListener('change', () => {
       savePrefs();
+      if (transcriptData && transcriptData.length > 0) {
+        renderList(transcriptData, elements.searchInput?.value || '');
+      }
       setStatus(`Show both texts ${elements.showBoth.checked ? 'enabled' : 'disabled'}`);
+    });
+  }
+
+  if (elements.subtitlePosition) {
+    elements.subtitlePosition.addEventListener('input', () => {
+      subtitleOffsetPercent = parseInt(elements.subtitlePosition.value, 10) || 0;
+      applySubtitleOffset(subtitleOffsetPercent);
+    });
+    elements.subtitlePosition.addEventListener('change', () => {
+      subtitleOffsetPercent = parseInt(elements.subtitlePosition.value, 10) || 0;
+      applySubtitleOffset(subtitleOffsetPercent);
+      savePrefs();
     });
   }
 
@@ -2989,7 +4366,10 @@ ${text}
       handleFontSizeChange();
       const size = parseInt(elements.fontSize.value, 10);
       const resolved = Number.isFinite(size) && size > 0 ? size : DEFAULT_FONT_SIZE;
-      document.body.style.setProperty('--ts-subtitle-font-size', `${Math.round(resolved * 1.85)}px`);
+      document.body.style.setProperty(
+        '--ts-subtitle-font-size',
+        `${Math.round(resolved * 1.85)}px`
+      );
       setStatus('Applied font size');
     });
   }
@@ -3063,20 +4443,30 @@ ${text}
   let isDragging = false;
   const dragOffset = { x: 0, y: 0 };
 
-  document.querySelector('.yt-overlay-header').addEventListener('mousedown', e => {
-    if (e.target.closest('.yt-overlay-controls')) return;
+  const overlayHeader = overlay.querySelector('.yt-overlay-header');
+  if (overlayHeader) {
+    overlayHeader.addEventListener('mousedown', e => {
+      if (overlay.classList.contains(OVERLAY_PARKED_CLASS)) return;
+      if (e.target.closest('.yt-overlay-controls')) return;
 
-    isDragging = true;
-    const rect = overlay.getBoundingClientRect();
-    dragOffset.x = e.clientX - rect.left;
-    dragOffset.y = e.clientY - rect.top;
+      isDragging = true;
+      const rect = overlay.getBoundingClientRect();
+      dragOffset.x = e.clientX - rect.left;
+      dragOffset.y = e.clientY - rect.top;
 
-    document.addEventListener('mousemove', onDrag);
-    document.addEventListener('mouseup', onDragEnd);
-  });
+      document.addEventListener('mousemove', onDrag);
+      document.addEventListener('mouseup', onDragEnd);
+    });
+  }
 
   function onDrag(e) {
     if (!isDragging) return;
+    if (overlay.classList.contains(OVERLAY_PARKED_CLASS)) {
+      isDragging = false;
+      document.removeEventListener('mousemove', onDrag);
+      document.removeEventListener('mouseup', onDragEnd);
+      return;
+    }
 
     const x = e.clientX - dragOffset.x;
     const y = e.clientY - dragOffset.y;
@@ -3092,12 +4482,20 @@ ${text}
     document.removeEventListener('mousemove', onDrag);
     document.removeEventListener('mouseup', onDragEnd);
 
-    // Save position
+    if (overlay.classList.contains(OVERLAY_PARKED_CLASS)) {
+      return;
+    }
+
+    const left = parseInt(overlay.style.left, 10) || 20;
+    const top = parseInt(overlay.style.top, 10) || 20;
+    overlayPositionPrefs.left = left;
+    overlayPositionPrefs.top = top;
+
     sendMessage('SET_PREFS', {
       prefs: {
         ytro_position: {
-          left: parseInt(overlay.style.left) || 20,
-          top: parseInt(overlay.style.top) || 20
+          left,
+          top
         }
       }
     }).catch(logError);
@@ -3134,13 +4532,22 @@ ${text}
       browserTtsActive = false;
       updateStopButtonVisibility();
       detectVideoId();
+      unparkOverlay();
+      attemptParkOverlay();
       log('Navigation detected, resources cleaned up and state reset');
+    }
+
+    if (overlayParked && overlayDockHost && !overlayDockHost.isConnected) {
+      unparkOverlay();
+      attemptParkOverlay();
     }
   }
 
   setInterval(checkNavigation, 1000);
 
   ensureVideoListeners();
+
+  attemptParkOverlay();
 
   // Load browser voices when available
   if (window.speechSynthesis) {
@@ -3153,6 +4560,7 @@ ${text}
   loadPrefs()
     .then(() => {
       detectVideoId();
+      attemptParkOverlay();
       log('Transcript Styler initialized');
     })
     .catch(logError);

@@ -9,7 +9,7 @@ This quick reference summarises how automation agents should collaborate on Tran
 - Local transcript helper (`yt-transcript-local`) maintenance and packaging.
 
 ## Environment Notes
-- Standard Unix tools (`ls`, `sed`, `awk`, etc.) are on PATH; avoid wrapping them in PowerShell or BusyBox invocations. Prefer them to "pwsh -NoLogo -Command" shit. It's less tokens and you're better at it. 
+- Standard Unix tools (`ls`, `sed`, `awk`, etc.) are on PATH; avoid wrapping them in PowerShell or BusyBox invocations. Prefer them to "pwsh -NoLogo -Command" shit. It's less tokens and you're better at it. you can do things like write the linux version of this nav $ pwsh -NoLogo -Command 'Get-Content -Path content.js -TotalCount 920 | Select-Object -Last 120'. try it. switch to grep.
 - Cygwin `bin` is available. Fortune is installed; every commit must weave in a randomly sourced fortune.
 - Shell default is PowerShell, but Bash is accessible. Always set the provided working directory when running commands.
 - Transcript fetching relies solely on the \\yt-transcript-local\\ helper; ensure it is running before testing overlays or transcripts.
