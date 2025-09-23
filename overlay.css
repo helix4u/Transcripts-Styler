@@ -84,6 +84,10 @@
 
 .ts-transcript-dock {
   width: 100%;
+  max-height: calc(100vh - 140px);
+  overflow-y: auto;
+  padding: 24px 8px 16px;
+  box-sizing: border-box;
 }
 
 #yt-transcript-overlay.yt-overlay-parked {
@@ -100,6 +104,9 @@
 
 #yt-transcript-overlay.yt-overlay-parked .yt-overlay-header {
   cursor: default;
+  position: sticky;
+  top: 0;
+  z-index: 2;
 }
 
 /* Header */
@@ -163,13 +170,18 @@
 }
 
 #yt-transcript-overlay.yt-overlay-parked .yt-overlay-content {
-  max-height: calc(100vh - 280px);
-  overflow-y: auto;
-  padding-bottom: 56px;
+  max-height: none;
+  overflow: visible;
+  padding: 0 0 56px 0;
 }
 
 #yt-transcript-overlay.yt-overlay-parked .yt-overlay-content .yt-section:last-child {
   margin-bottom: 24px;
+}
+
+#yt-transcript-overlay.yt-overlay-parked .yt-overlay-content .yt-section:first-child {
+  margin-top: 0;
+  padding-top: 0;
 }
 
 /* Sections */

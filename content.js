@@ -33,10 +33,13 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
   const OVERLAY_PARKED_CLASS = 'yt-overlay-parked';
   const OVERLAY_DOCK_CLASS = 'ts-transcript-dock';
   const overlayPositionPrefs = { left: 20, top: 20 };
-  let overlayDockPreferred = true;
+  let overlayDockPreferred = false;
   let subtitleOffsetPercent = 12;
   let guardPauseMs = 800;
   const SINGLE_CALL_MAX_CHUNK_SECONDS = 60;
+  let manualTranscriptScroll = false;
+  let manualScrollResetId = null;
+  const MANUAL_SCROLL_RESET_MS = 2500;
 
   const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -1593,6 +1596,9 @@ Context (next fragments):
 
   function applyActiveHighlight(scrollIntoView = false) {
     if (!elements.transcriptList) return;
+    if (scrollIntoView && manualTranscriptScroll) {
+      return;
+    }
     const items = elements.transcriptList.querySelectorAll('.yt-transcript-item');
     items.forEach(item => {
       const idx = Number(item.dataset.index);
@@ -1607,6 +1613,21 @@ Context (next fragments):
         }
       }
     });
+  }
+
+  function scheduleManualScrollReset() {
+    if (manualScrollResetId) {
+      clearTimeout(manualScrollResetId);
+    }
+    manualScrollResetId = setTimeout(() => {
+      manualTranscriptScroll = false;
+      manualScrollResetId = null;
+    }, MANUAL_SCROLL_RESET_MS);
+  }
+
+  function handleManualTranscriptScroll() {
+    manualTranscriptScroll = true;
+    scheduleManualScrollReset();
   }
 
   function seekTo(seconds) {
@@ -2898,21 +2919,13 @@ Context (next fragments):
       text: String(seg.text || '')
     }));
 
-    const systemPrompt = `You are rewriting a full closed-caption transcript in a coherent way that will be shown alongside the original realtime youtube CC transcription.
-Style: ${style}
-Output language: ${outLang}
+    const constraintBlock = `Constraints:\n- Preserve the number of segments and each segment's start and end timestamps unchanged.\n- Rewrite only the text content to be coherent and fluent while keeping similar word density per segment so playback pacing remains natural.\n- Do not invent content, speaker names, or change timing.\n- Return ONLY strict JSON with this exact shape and property names:\n{ "segments": [ { "start": number, "end": number, "text": string }, ... ] }`;
 
-Constraints:
-- Preserve the number of segments and each segment's start and end timestamps unchanged.
-- Rewrite only the text content to be coherent and fluent while keeping similar word density per segment so playback pacing remains natural.
-- Do not invent content, speaker names, or change timing.
-- Return ONLY strict JSON with this exact shape and property names:
-{ "segments": [ { "start": number, "end": number, "text": string }, ... ] }
-No markdown fences, no commentary.`;
+    const systemPrompt = `You are rewriting a full closed-caption transcript in a coherent way that will be shown alongside the original realtime youtube CC transcription.\nStyle: ${style}\nOutput language: ${outLang}\n\n${constraintBlock}\nNo markdown fences, no commentary.`;
 
     const jsonStr = JSON.stringify({ segments: minimal });
 
-    let userPrompt = `Input segments (JSON):\n${jsonStr}`;
+    let userPrompt = `${constraintBlock}\n\nInput segments (JSON):\n${jsonStr}`;
     if (elements.asciiOnly.checked) {
       userPrompt += `\n\nIMPORTANT: Use only standard ASCII characters in your response. Avoid accented letters, special punctuation, or Unicode symbols.`;
       if (elements.blocklist.value.trim()) {
@@ -4458,6 +4471,20 @@ ${text}
     });
   }
 
+  if (elements.transcriptList) {
+    ['wheel', 'touchstart', 'pointerdown', 'mousedown'].forEach(eventName => {
+      elements.transcriptList.addEventListener(eventName, () => {
+        handleManualTranscriptScroll();
+      });
+    });
+
+    elements.transcriptList.addEventListener('scroll', () => {
+      if (manualTranscriptScroll) {
+        scheduleManualScrollReset();
+      }
+    });
+  }
+
   function onDrag(e) {
     if (!isDragging) return;
     if (overlay.classList.contains(OVERLAY_PARKED_CLASS)) {
@@ -4532,21 +4559,23 @@ ${text}
       updateStopButtonVisibility();
       detectVideoId();
       unparkOverlay();
-      attemptParkOverlay();
+      if (overlayDockPreferred) {
+        attemptParkOverlay();
+      }
       log('Navigation detected, resources cleaned up and state reset');
     }
 
     if (overlayParked && overlayDockHost && !overlayDockHost.isConnected) {
       unparkOverlay();
-      attemptParkOverlay();
+      if (overlayDockPreferred) {
+        attemptParkOverlay();
+      }
     }
   }
 
   setInterval(checkNavigation, 1000);
 
   ensureVideoListeners();
-
-  attemptParkOverlay();
 
   // Load browser voices when available
   if (window.speechSynthesis) {
@@ -4559,7 +4588,9 @@ ${text}
   loadPrefs()
     .then(() => {
       detectVideoId();
-      attemptParkOverlay();
+      if (overlayDockPreferred) {
+        attemptParkOverlay();
+      }
       log('Transcript Styler initialized');
     })
     .catch(logError);
