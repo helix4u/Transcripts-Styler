@@ -40,6 +40,8 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
   let manualTranscriptScroll = false;
   let manualScrollResetId = null;
   const MANUAL_SCROLL_RESET_MS = 2500;
+  let autoScrollEnabled = false;
+  let subtitleTimingOffsetMs = 0;
 
   const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -158,6 +160,10 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
         <label style="flex: 1;">Subtitle position:</label>
         <input type="range" id="yt-subtitle-position" min="0" max="40" value="12" step="1" style="flex: 2;">
         <span id="yt-subtitle-position-value">12%</span>
+      </div>
+      <div class="yt-controls">
+        <label style="flex: 1;">Timing offset (ms):</label>
+        <input type="number" id="yt-subtitle-timing" value="0" min="-5000" max="5000" step="50" style="flex: 2;">
       </div>
     </div>
 
@@ -348,6 +354,9 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
       <div class="yt-controls">
         <label><input type="checkbox" id="yt-furigana"> Show furigana for Japanese text</label>
         <label><input type="checkbox" id="yt-show-both"> Show both original and styled text over video</label>
+      </div>
+      <div class="yt-controls">
+        <label><input type="checkbox" id="yt-auto-scroll"> Auto-scroll transcript list</label>
       </div>
       <div id="yt-transcript-list" class="yt-transcript-list"></div>
     </div>
@@ -813,6 +822,7 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
     importPresetsBtn: document.getElementById('yt-import-presets-btn'),
     subtitlePosition: document.getElementById('yt-subtitle-position'),
     subtitlePositionValue: document.getElementById('yt-subtitle-position-value'),
+    subtitleTiming: document.getElementById('yt-subtitle-timing'),
 
     langPrefs: document.getElementById('yt-lang-prefs'),
     fontSize: document.getElementById('yt-font-size'),
@@ -869,6 +879,7 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
     guardPauseValue: document.getElementById('yt-guard-pause-value'),
     furigana: document.getElementById('yt-furigana'),
     showBoth: document.getElementById('yt-show-both'),
+    autoScroll: document.getElementById('yt-auto-scroll'),
     status: document.getElementById('yt-status')
   };
 
@@ -878,6 +889,12 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
   syncAutoTtsGuardUi();
   syncProviderUI();
   syncTtsUI();
+  if (elements.autoScroll) {
+    elements.autoScroll.checked = autoScrollEnabled;
+  }
+  if (elements.subtitleTiming) {
+    elements.subtitleTiming.value = String(subtitleTimingOffsetMs);
+  }
 
   // Default values
   const DEFAULT_PROMPT = `Restyle this closed-caption sentence fragment in {{style}} style. Output language: {{outlang}}. This input is a partial sentence from on-screen captions. Keep the meaning intact but improve clarity and readability for captions. Keep sentence pacing etc. Just change verbiage and vibe. It will play alongside the youtube vid in CCs. Do not include timestamps, time ranges, or any numerals that are part of time markers; ignore them entirely. Do not add speaker names or extra content. If ASCII-only mode is enabled, use only standard ASCII characters (no accents, special punctuation, or Unicode symbols).
@@ -1154,6 +1171,16 @@ Context (next fragments):
           }
           applySubtitleOffset(subtitleOffsetPercent);
 
+          if (typeof ytro_prefs.subtitleTimingOffset === 'number') {
+            subtitleTimingOffsetMs = Math.max(
+              -5000,
+              Math.min(5000, parseInt(ytro_prefs.subtitleTimingOffset, 10) || 0)
+            );
+          }
+          if (elements.subtitleTiming) {
+            elements.subtitleTiming.value = String(subtitleTimingOffsetMs);
+          }
+
           // Auto-TTS settings
           setIf(elements.autoTts, ytro_prefs.autoTts, 'checked');
           setIf(elements.autoTtsType, ytro_prefs.autoTtsType);
@@ -1165,6 +1192,13 @@ Context (next fragments):
             guardPauseMs = Math.max(0, parseInt(ytro_prefs.guardPauseMs, 10) || 0);
           }
           syncGuardPauseUI();
+
+          if (typeof ytro_prefs.autoScroll === 'boolean') {
+            autoScrollEnabled = ytro_prefs.autoScroll;
+          }
+          if (elements.autoScroll) {
+            elements.autoScroll.checked = autoScrollEnabled;
+          }
 
           // Furigana settings
           setIf(elements.furigana, ytro_prefs.furigana, 'checked');
@@ -1234,6 +1268,8 @@ Context (next fragments):
       temperature: parseFloat(elements.temperature?.value) || 0.4,
       styleText: elements.styleText?.value || '',
       subtitleOffset: subtitleOffsetPercent,
+      subtitleTimingOffset: subtitleTimingOffsetMs,
+      autoScroll: Boolean(elements.autoScroll?.checked),
 
       // Auto-TTS settings
       autoTts: elements.autoTts?.checked || false,
@@ -1512,19 +1548,23 @@ Context (next fragments):
 
   function findSegmentIndex(time) {
     if (!Array.isArray(transcriptData) || !transcriptData.length) return -1;
+    const shiftSeconds = subtitleTimingOffsetMs / 1000;
     for (let i = 0; i < transcriptData.length; i += 1) {
       const segment = transcriptData[i];
-      const start = typeof segment.start === 'number' ? segment.start : 0;
-      const nextStart =
+      const startRaw = typeof segment.start === 'number' ? segment.start : 0;
+      const start = startRaw + shiftSeconds;
+      const nextStartRaw =
         typeof transcriptData[i + 1]?.start === 'number'
           ? transcriptData[i + 1].start
           : Number.POSITIVE_INFINITY;
-      const end = typeof segment.end === 'number' ? segment.end : Math.min(nextStart, start + 6);
+      const endRawCandidate =
+        typeof segment.end === 'number' ? segment.end : Math.min(nextStartRaw, startRaw + 6);
+      const end = endRawCandidate + shiftSeconds;
       if (time + 0.05 >= start && time <= end + 0.05) {
         return i;
       }
     }
-    return time >= (transcriptData[transcriptData.length - 1]?.start || 0)
+    return time >= ((transcriptData[transcriptData.length - 1]?.start || 0) + shiftSeconds)
       ? transcriptData.length - 1
       : -1;
   }
@@ -1596,6 +1636,9 @@ Context (next fragments):
 
   function applyActiveHighlight(scrollIntoView = false) {
     if (!elements.transcriptList) return;
+    if (!autoScrollEnabled && scrollIntoView) {
+      return;
+    }
     if (scrollIntoView && manualTranscriptScroll) {
       return;
     }
@@ -4267,6 +4310,38 @@ ${text}
       syncGuardPauseUI();
       savePrefs();
     });
+  }
+
+  if (elements.autoScroll) {
+    elements.autoScroll.addEventListener('change', () => {
+      autoScrollEnabled = Boolean(elements.autoScroll.checked);
+      if (autoScrollEnabled) {
+        manualTranscriptScroll = false;
+      }
+      savePrefs();
+    });
+  }
+
+  if (elements.subtitleTiming) {
+    const clampTiming = value => {
+      const parsed = parseInt(value, 10) || 0;
+      return Math.max(-5000, Math.min(5000, parsed));
+    };
+
+    const updateTiming = shouldSave => {
+      subtitleTimingOffsetMs = clampTiming(elements.subtitleTiming.value);
+      elements.subtitleTiming.value = String(subtitleTimingOffsetMs);
+      const video = getVideoElement();
+      if (video) {
+        updateActiveSegment(video.currentTime || 0).catch(logError);
+      }
+      if (shouldSave) {
+        savePrefs();
+      }
+    };
+
+    elements.subtitleTiming.addEventListener('input', () => updateTiming(false));
+    elements.subtitleTiming.addEventListener('change', () => updateTiming(true));
   }
 
   if (elements.furigana) {
