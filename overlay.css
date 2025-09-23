@@ -105,8 +105,8 @@
 #yt-transcript-overlay.yt-overlay-parked .yt-overlay-header {
   cursor: default;
   position: sticky;
-  top: -6px;
-  padding-top: 14px;
+  top: -30px;
+  padding-top: 1px;
   z-index: 2;
 }
 
@@ -161,6 +161,17 @@
 
 .yt-overlay-controls button:hover {
   background: var(--yt-button-hover);
+}
+
+.yt-overlay-controls button.yt-toggle-active {
+  background: var(--yt-accent-color);
+  border-color: var(--yt-accent-color);
+  color: #ffffff;
+}
+
+.yt-overlay-controls button.yt-toggle-active:hover {
+  background: var(--yt-accent-color);
+  filter: brightness(1.1);
 }
 
 /* Content Area */

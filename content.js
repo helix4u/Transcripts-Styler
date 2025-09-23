@@ -44,6 +44,11 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
   let autoScrollEnabled = false;
   let subtitleTimingOffsetMs = 0;
   let extensionEnabled = true;
+  let subtitlesEnabled = true;
+  let autoLoadPromise = null;
+  let autoLoadTimerId = null;
+  let lastAutoLoadedVideoId = '';
+  let lastAutoLoadAttempt = 0;
 
   const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -319,6 +324,7 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
     <span class="yt-overlay-title">Transcript Styler v0.4.1 Beta</span>
     <div class="yt-overlay-controls">
       <button id="yt-dock-toggle" title="Dock in transcript">⇆</button>
+      <button id="yt-subtitle-toggle" title="Toggle on-video subtitles" aria-pressed="true">CC</button>
       <label><input type="checkbox" id="yt-debug-toggle"> Debug Logging</label>
       <button id="yt-collapse-btn">−</button>
       <button id="yt-close-btn">×</button>
@@ -601,6 +607,10 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
       if (subtitleOverlayEl && subtitleOverlayEl.isConnected) {
         subtitleOverlayEl.remove();
       }
+      if (autoLoadTimerId) {
+        clearTimeout(autoLoadTimerId);
+        autoLoadTimerId = null;
+      }
       releaseAutoTtsGuard({ resumeVideo: true });
       stopRestyle();
       stopTTS().catch(() => {});
@@ -618,6 +628,152 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
 
     if (stateChanged || !elements.videoId.value) {
       detectVideoId();
+      if (subtitlesEnabled) {
+        scheduleAutoLoadTranscript('enable');
+      }
+    } else if (stateChanged && subtitlesEnabled) {
+      scheduleAutoLoadTranscript('enable');
+    }
+  }
+
+  function syncSubtitleToggleUI() {
+    if (!elements.subtitleToggle) return;
+    elements.subtitleToggle.classList.toggle('yt-toggle-active', subtitlesEnabled);
+    elements.subtitleToggle.setAttribute('aria-pressed', subtitlesEnabled ? 'true' : 'false');
+    elements.subtitleToggle.title = subtitlesEnabled
+      ? 'Turn off on-video subtitles'
+      : 'Turn on on-video subtitles';
+  }
+
+  function scheduleAutoLoadTranscript(reason = 'auto') {
+    if (!extensionEnabled || !subtitlesEnabled) {
+      return;
+    }
+
+    if (autoLoadTimerId) {
+      clearTimeout(autoLoadTimerId);
+      autoLoadTimerId = null;
+    }
+
+    autoLoadTimerId = setTimeout(() => {
+      autoLoadTimerId = null;
+      autoLoadTranscriptIfNeeded({ force: true, reason }).catch(error => {
+        logError('Auto transcript load failed:', error);
+      });
+    }, 600);
+  }
+
+  async function autoLoadTranscriptIfNeeded({ force = false, reason = 'auto' } = {}) {
+    if (!extensionEnabled || !subtitlesEnabled) {
+      return;
+    }
+
+    const videoId = (elements.videoId?.value || '').trim() || detectVideoId();
+    if (!videoId) {
+      return;
+    }
+
+    if (!force && transcriptData.length) {
+      return;
+    }
+
+    if (!force && videoId === lastAutoLoadedVideoId) {
+      return;
+    }
+
+    if (autoLoadPromise) {
+      return autoLoadPromise;
+    }
+
+    const now = Date.now();
+    if (!force && now - lastAutoLoadAttempt < 4000) {
+      return;
+    }
+    lastAutoLoadAttempt = now;
+
+    log(`Auto load triggered (${reason}) for video ${videoId}`);
+
+    autoLoadPromise = (async () => {
+      try {
+        setStatus('Auto fetching captions...');
+        const tracks = await detectAndListTracks();
+        if (!Array.isArray(tracks) || !tracks.length) {
+          setStatus('Auto load: no caption tracks found');
+          log('Auto load: no tracks returned');
+          return;
+        }
+
+        if (!elements.trackSelect.value) {
+          elements.trackSelect.value = JSON.stringify(tracks[0]);
+        }
+
+        if (!elements.trackSelect.value) {
+          log('Auto load: track selection missing');
+          return;
+        }
+
+        const loaded = await fetchTranscript();
+        if (loaded) {
+          lastAutoLoadedVideoId = videoId;
+          setStatus('Auto-loaded default transcript');
+        } else {
+          setStatus('Auto load: transcript fetch failed');
+        }
+      } catch (error) {
+        logError('Auto load error:', error);
+        setError(`Auto load failed: ${error.message}`);
+      } finally {
+        autoLoadPromise = null;
+      }
+    })();
+
+    return autoLoadPromise;
+  }
+
+  function setSubtitlesEnabled(enabled, { save = true, triggerAutoLoad = false } = {}) {
+    const resolved = Boolean(enabled);
+    const wasEnabled = subtitlesEnabled;
+
+    if (resolved === wasEnabled) {
+      syncSubtitleToggleUI();
+      if (subtitlesEnabled && triggerAutoLoad) {
+        scheduleAutoLoadTranscript('subtitle-toggle');
+      }
+      return;
+    }
+
+    subtitlesEnabled = resolved;
+
+    if (!subtitlesEnabled) {
+      if (autoLoadTimerId) {
+        clearTimeout(autoLoadTimerId);
+        autoLoadTimerId = null;
+      }
+      if (subtitleOverlayEl) {
+        subtitleOverlayEl.textContent = '';
+        if (subtitleOverlayEl.isConnected) {
+          subtitleOverlayEl.remove();
+        }
+      }
+      updateSubtitleText(null);
+    } else {
+      ensureSubtitleOverlay();
+      const video = getVideoElement();
+      if (video && transcriptData.length) {
+        updateActiveSegment(video.currentTime || 0).catch(error => {
+          logError('Failed to sync subtitles after enabling:', error);
+        });
+      }
+    }
+
+    syncSubtitleToggleUI();
+
+    if (save) {
+      savePrefs();
+    }
+
+    if (subtitlesEnabled) {
+      scheduleAutoLoadTranscript('subtitle-toggle');
     }
   }
 
@@ -1059,6 +1215,7 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
     closeBtn: document.getElementById('yt-close-btn'),
     content: document.querySelector('.yt-overlay-content'),
     dockToggle: document.getElementById('yt-dock-toggle'),
+    subtitleToggle: document.getElementById('yt-subtitle-toggle'),
 
     videoId: document.getElementById('yt-video-id'),
     refreshTracksBtn: document.getElementById('yt-refresh-tracks-btn'),
@@ -1136,6 +1293,7 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
   };
 
   syncDockToggleUI();
+  syncSubtitleToggleUI();
   syncGuardPauseUI();
   applySubtitleOffset(subtitleOffsetPercent);
   syncAutoTtsGuardUi();
@@ -1471,6 +1629,24 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
             elements.autoScroll.checked = autoScrollEnabled;
           }
 
+          if (typeof ytro_prefs.subtitlesEnabled === 'boolean') {
+            subtitlesEnabled = ytro_prefs.subtitlesEnabled;
+          } else {
+            subtitlesEnabled = true;
+          }
+
+          if (!subtitlesEnabled && autoLoadTimerId) {
+            clearTimeout(autoLoadTimerId);
+            autoLoadTimerId = null;
+          }
+
+          if (!subtitlesEnabled && subtitleOverlayEl && subtitleOverlayEl.isConnected) {
+            subtitleOverlayEl.remove();
+          }
+          if (!subtitlesEnabled) {
+            updateSubtitleText(null);
+          }
+
           // Furigana settings
           setIf(elements.furigana, ytro_prefs.furigana, 'checked');
           setIf(elements.showBoth, ytro_prefs.showBoth, 'checked');
@@ -1488,6 +1664,7 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
           }
 
           syncDockToggleUI();
+          syncSubtitleToggleUI();
 
           Object.assign(lastPrefs, ytro_prefs);
           syncProviderUI();
@@ -1507,9 +1684,12 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
       } else {
         applyExtensionEnabledState(true);
       }
+
+      syncSubtitleToggleUI();
     } catch (error) {
       logError('Failed to load preferences:', error);
       applyExtensionEnabledState(true);
+      syncSubtitleToggleUI();
     }
   }
 
@@ -1548,6 +1728,7 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
       styleText: elements.styleText?.value || '',
       subtitleOffset: subtitleOffsetPercent,
       subtitleTimingOffset: subtitleTimingOffsetMs,
+      subtitlesEnabled,
       autoScroll: Boolean(elements.autoScroll?.checked),
 
       // Auto-TTS settings
@@ -1663,7 +1844,10 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
 
   // Parsing functions
   function ensureSubtitleOverlay() {
-    if (!extensionEnabled) {
+    if (!extensionEnabled || !subtitlesEnabled) {
+      if (subtitleOverlayEl && subtitleOverlayEl.isConnected) {
+        subtitleOverlayEl.remove();
+      }
       return null;
     }
 
@@ -3447,7 +3631,7 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
       if (!tracks.length) {
         elements.trackSelect.innerHTML = '<option value="">No tracks found</option>';
         setError('No caption tracks available from the local helper');
-        return;
+        return [];
       }
 
       const normalized = tracks.map((track, index) => {
@@ -3495,10 +3679,12 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
 
       setStatus(`Found ${normalized.length} tracks in ${dur(start)}`);
       log(`Listed ${normalized.length} tracks via local helper`, normalized);
+      return normalized;
     } catch (error) {
       logError('Failed to list tracks:', error);
       elements.trackSelect.innerHTML = '<option value="">No tracks found</option>';
       setError(`Failed to list tracks: ${error.message}`);
+      return [];
     }
   }
 
@@ -3507,10 +3693,10 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
     if (!existingValue) {
       const detectedId = detectVideoId();
       if (!detectedId) {
-        return;
+        return [];
       }
     }
-    await listTracks();
+    return listTracks();
   }
   // Transcript fetching
   async function fetchTranscript() {
@@ -4568,6 +4754,12 @@ ${text}
     });
   }
 
+  if (elements.subtitleToggle) {
+    elements.subtitleToggle.addEventListener('click', () => {
+      setSubtitlesEnabled(!subtitlesEnabled, { save: true, triggerAutoLoad: true });
+    });
+  }
+
   // Font size live updates
   if (elements.fontSize) {
     elements.fontSize.addEventListener('input', handleFontSizeChange);
@@ -4850,6 +5042,12 @@ ${text}
       if (Object.prototype.hasOwnProperty.call(changes, 'ytro_extension_enabled')) {
         applyExtensionEnabledState(Boolean(changes.ytro_extension_enabled.newValue));
       }
+      if (Object.prototype.hasOwnProperty.call(changes, 'ytro_prefs')) {
+        const newPrefs = changes.ytro_prefs.newValue || {};
+        if (typeof newPrefs.subtitlesEnabled === 'boolean') {
+          setSubtitlesEnabled(newPrefs.subtitlesEnabled, { save: false });
+        }
+      }
     });
   }
 
@@ -4998,6 +5196,9 @@ ${text}
       browserTtsActive = false;
       updateStopButtonVisibility();
       detectVideoId();
+      if (subtitlesEnabled) {
+        scheduleAutoLoadTranscript('navigation');
+      }
       unparkOverlay();
       if (overlayDockPreferred) {
         attemptParkOverlay();
@@ -5010,6 +5211,12 @@ ${text}
       if (overlayDockPreferred) {
         attemptParkOverlay();
       }
+    }
+
+    if (subtitlesEnabled && extensionEnabled && !transcriptData.length) {
+      autoLoadTranscriptIfNeeded({ reason: 'heartbeat' }).catch(error => {
+        logError('Auto load heartbeat failed:', error);
+      });
     }
   }
 
