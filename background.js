@@ -3,6 +3,7 @@
 
 // Global debug state
 let DEBUG_ENABLED = false;
+let EXTENSION_ENABLED = true;
 
 // Logging utilities
 
@@ -62,6 +63,53 @@ function fetchWithCreds(url, options = {}) {
   return fetch(url, { credentials: 'include', ...options });
 }
 
+
+function updateActionBadge(enabled) {
+  if (enabled) {
+    chrome.action.setBadgeText({ text: '' });
+    return;
+  }
+
+  chrome.action.setBadgeBackgroundColor({ color: '#d93025' });
+  chrome.action.setBadgeText({ text: 'OFF' });
+}
+
+async function broadcastExtensionState(enabled) {
+  try {
+    const tabs = await chrome.tabs.query({ url: '*://*.youtube.com/*' });
+    await Promise.all(
+      tabs.map(tab =>
+        chrome.tabs
+          .sendMessage(tab.id, {
+            action: 'SET_EXTENSION_ENABLED',
+            enabled
+          })
+          .catch(() => {})
+      )
+    );
+  } catch (error) {
+    logError('Failed to broadcast extension state', error.message || error);
+  }
+}
+
+async function setExtensionEnabled(enabled, reason = 'action-click') {
+  const resolved = Boolean(enabled);
+  if (EXTENSION_ENABLED === resolved) {
+    return;
+  }
+
+  EXTENSION_ENABLED = resolved;
+  updateActionBadge(EXTENSION_ENABLED);
+  log(`Extension ${EXTENSION_ENABLED ? 'enabled' : 'disabled'} (${reason})`);
+
+  try {
+    await chrome.storage.local.set({ ytro_extension_enabled: EXTENSION_ENABLED });
+  } catch (error) {
+    logError('Failed to persist extension toggle state', error.message || error);
+  }
+
+  await broadcastExtensionState(EXTENSION_ENABLED);
+}
 
 // Directly call the helper's local backend to obtain the exact text shown in <pre id="output">
 async function fetchFromLocalTranscriptApi(videoId, lang, preferAsr = false) {
@@ -898,6 +946,16 @@ async function handleSetPrefs(data, sendResponse) {
       log(`Debug mode ${DEBUG_ENABLED ? 'enabled' : 'disabled'}`);
     }
 
+    if (prefs.ytro_extension_enabled !== undefined) {
+      const resolved = Boolean(prefs.ytro_extension_enabled);
+      if (resolved !== EXTENSION_ENABLED) {
+        EXTENSION_ENABLED = resolved;
+        updateActionBadge(EXTENSION_ENABLED);
+        log(`Extension ${EXTENSION_ENABLED ? 'enabled' : 'disabled'} (prefs update)`);
+        await broadcastExtensionState(EXTENSION_ENABLED);
+      }
+    }
+
     log('Preferences saved:', Object.keys(prefs));
     sendResponse({ success: true });
   } catch (error) {
@@ -907,9 +965,22 @@ async function handleSetPrefs(data, sendResponse) {
 }
 
 // Initialize debug state on startup
-chrome.storage.local.get(['ytro_debug']).then(result => {
+chrome.storage.local.get(['ytro_debug', 'ytro_extension_enabled']).then(result => {
   DEBUG_ENABLED = result.ytro_debug || false;
-  log('Background service worker initialized, debug:', DEBUG_ENABLED);
+  const storedEnabled = result.ytro_extension_enabled;
+  if (typeof storedEnabled === 'boolean') {
+    EXTENSION_ENABLED = storedEnabled;
+  }
+  updateActionBadge(EXTENSION_ENABLED);
+  log('Background service worker initialized, debug:', DEBUG_ENABLED, 'enabled:', EXTENSION_ENABLED);
+  broadcastExtensionState(EXTENSION_ENABLED).catch(error => {
+    logError('Failed to broadcast initial extension state', error.message || error);
+  });
+});
+
+chrome.action.onClicked.addListener(async () => {
+  const nextState = !EXTENSION_ENABLED;
+  await setExtensionEnabled(nextState);
 });
 
 log('Transcript Styler background script loaded');
