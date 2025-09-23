@@ -36,6 +36,7 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
   let overlayDockPreferred = true;
   let subtitleOffsetPercent = 12;
   let guardPauseMs = 800;
+  const SINGLE_CALL_MAX_CHUNK_SECONDS = 60;
 
   const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -219,14 +220,14 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
       </div>
       <div class="yt-controls">
         <label>Temperature:</label>
-        <input type="number" id="yt-temperature" min="0" max="2" step="0.1" value="0.7" style="width: 80px;">
+        <input type="number" id="yt-temperature" min="0" max="2" step="0.1" value="0.4" style="width: 80px;">
       </div>
       <div class="yt-controls">
         <label>Max tokens:</label>
-        <input type="number" id="yt-max-tokens" min="64" max="320000" value="1000" style="width: 80px;">
+        <input type="number" id="yt-max-tokens" min="64" max="320000" value="8192" style="width: 80px;">
       </div>
       <div class="yt-controls">
-        <label><input type="checkbox" id="yt-single-call"> Single-call restyle</label>
+        <label><input type="checkbox" id="yt-single-call" checked> Single-call restyle</label>
       </div>
       <div class="yt-controls">
         <label>ASCII Blocklist:</label>
@@ -246,10 +247,10 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
           <option value="academic">Academic & Formal</option>
           <option value="creative">Creative & Engaging</option>
           <option value="technical">Technical & Precise</option>
-          <option value="custom">Custom</option>
+          <option value="custom" selected>Custom</option>
         </select>
       </div>
-      <div class="yt-controls" id="yt-style-text-row" style="display: none;">
+      <div class="yt-controls" id="yt-style-text-row" style="display: block;">
         <input type="text" id="yt-style-text" placeholder="Describe style (e.g., Cartman from South Park)" style="width: 100%;">
       </div>
       <textarea id="yt-prompt-template" rows="4" style="width: 100%;" placeholder="Custom prompt template..."></textarea>
@@ -272,7 +273,7 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
           <option value="openai-compatible">OpenAI-Compatible</option>
           <option value="kokoro">Kokoro FastAPI</option>
           <option value="azure">Azure TTS</option>
-          <option value="browser">Browser TTS</option>
+          <option value="browser" selected>Browser TTS</option>
         </select>
       </div>
       <div class="yt-controls" id="yt-tts-voice-controls">
@@ -330,7 +331,7 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
         <label><input type="checkbox" id="yt-auto-tts"> Auto-play TTS with video timing</label>
         <select id="yt-auto-tts-type" style="margin-left: 10px;">
           <option value="original">Original text</option>
-          <option value="restyled">Restyled text</option>
+          <option value="restyled" selected>Restyled text</option>
         </select>
       </div>
       <div class="yt-controls">
@@ -872,6 +873,8 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
   syncGuardPauseUI();
   applySubtitleOffset(subtitleOffsetPercent);
   syncAutoTtsGuardUi();
+  syncProviderUI();
+  syncTtsUI();
 
   // Default values
   const DEFAULT_PROMPT = `Restyle this closed-caption sentence fragment in {{style}} style. Output language: {{outlang}}. This input is a partial sentence from on-screen captions. Keep the meaning intact but improve clarity and readability for captions. Keep sentence pacing etc. Just change verbiage and vibe. It will play alongside the youtube vid in CCs. Do not include timestamps, time ranges, or any numerals that are part of time markers; ignore them entirely. Do not add speaker names or extra content. If ASCII-only mode is enabled, use only standard ASCII characters (no accents, special punctuation, or Unicode symbols).
@@ -887,8 +890,8 @@ Context (next fragments):
 
   const DEFAULT_TTS_SETTINGS = {
     enabled: false,
-    provider: 'openai',
-    voice: 'alloy',
+    provider: 'browser',
+    voice: '',
     format: 'mp3',
     azureRegion: 'eastus',
     rate: 1.0
@@ -1224,14 +1227,14 @@ Context (next fragments):
       asciiOnly: elements.asciiOnly.checked,
       blocklist: elements.blocklist.value,
       singleCall: elements.singleCall.checked,
-      maxTokens: parseInt(elements.maxTokens?.value, 10) || 1000,
-      temperature: parseFloat(elements.temperature?.value) || 0.7,
+      maxTokens: parseInt(elements.maxTokens?.value, 10) || 8192,
+      temperature: parseFloat(elements.temperature?.value) || 0.4,
       styleText: elements.styleText?.value || '',
       subtitleOffset: subtitleOffsetPercent,
 
       // Auto-TTS settings
       autoTts: elements.autoTts?.checked || false,
-      autoTtsType: elements.autoTtsType?.value || 'original',
+      autoTtsType: elements.autoTtsType?.value || 'restyled',
       autoTtsGuard: autoTtsInterruptGuardEnabled,
       guardPauseMs,
 
@@ -1311,8 +1314,8 @@ Context (next fragments):
       azureRegion: elements.azureRegion.value,
       ttsRate: parseFloat(elements.ttsRate.value) || 1.0,
       singleCall: elements.singleCall.checked,
-      maxTokens: parseInt(elements.maxTokens?.value, 10) || 1000,
-      temperature: parseFloat(elements.temperature?.value) || 0.7,
+      maxTokens: parseInt(elements.maxTokens?.value, 10) || 8192,
+      temperature: parseFloat(elements.temperature?.value) || 0.4,
       styleText: elements.styleText?.value || ''
     };
   }
@@ -1559,7 +1562,7 @@ Context (next fragments):
         // Auto-play TTS if enabled and this is a new segment
         if (autoTtsEnabled && index !== lastAutoTtsSegment && index < transcriptData.length) {
           lastAutoTtsSegment = index;
-          const textType = elements.autoTtsType?.value || 'original';
+          const textType = elements.autoTtsType?.value || 'restyled';
 
           const startPlayback = () => playSegmentTTS(index, textType);
           const playbackPromise = Promise.resolve().then(startPlayback);
@@ -1600,11 +1603,7 @@ Context (next fragments):
         const itemRect = item.getBoundingClientRect();
         const listRect = list.getBoundingClientRect();
         if (itemRect.top < listRect.top || itemRect.bottom > listRect.bottom) {
-          const offset = item.offsetTop;
-          list.scrollTo({
-            top: offset - list.clientHeight / 2 + item.clientHeight / 2,
-            behavior: 'smooth'
-          });
+          item.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'smooth' });
         }
       }
     });
@@ -2978,7 +2977,7 @@ No markdown fences, no commentary.`;
     return 4; // fallback duration estimate in seconds
   }
 
-  function chunkTranscriptByDuration(segments, maxDurationSeconds = 120) {
+  function chunkTranscriptByDuration(segments, maxDurationSeconds = SINGLE_CALL_MAX_CHUNK_SECONDS) {
     if (!Array.isArray(segments) || !segments.length) {
       return [];
     }
@@ -3292,8 +3291,8 @@ No markdown fences, no commentary.`;
             batchId: activeBatchId,
             requestId: `${activeBatchId}:chunk-${i}`,
             anthropicVersion: elements.anthropicVersion.value.trim(),
-            maxTokens: parseInt(elements.maxTokens?.value, 10) || 1000,
-            temperature: parseFloat(elements.temperature?.value) || 0.7
+            maxTokens: parseInt(elements.maxTokens?.value, 10) || 8192,
+            temperature: parseFloat(elements.temperature?.value) || 0.4
           });
 
           if (aborter.signal.aborted || response?.aborted) {

@@ -6,7 +6,7 @@ Transcript Styler is a Manifest V3 Chrome extension that extracts YouTube captio
 - Captions retrieved exclusively through the bundled FastAPI helper (`yt-transcript-local`), which resolves tracks and returns timestamped segments for the UI overlay.
 - In-page overlay for detecting the current video, listing caption tracks, fetching transcripts, and previewing both original and AI-restyled text.
 - Prompt-driven LLM restyling pipeline with configurable provider (OpenAI, Anthropic, OpenAI-compatible), base URL override, model name, concurrency, ASCII-only enforcement, and reusable style presets.
-- Single-call restyling automatically chunks transcripts into sub-two-minute groups so LLM prompts stay focused and predictable.
+- Single-call restyling automatically chunks transcripts into sub-minute groups so LLM prompts stay focused and predictable.
 - Transcript workspace with search, active segment highlighting synced to playback, click-to-seek support, preset management, and an injected subtitle overlay on top of the YouTube player.
 - Dockable overlay with a one-click toggle: float it anywhere, snap it into the native transcript panel, and persist both the overlay position and subtitle vertical offset slider per user prefs.
 - Multi-provider TTS support (OpenAI, OpenAI-compatible, Azure, Kokoro, and on-device browser SpeechSynthesis), including Azure voice discovery and download-ready audio blobs.
@@ -92,7 +92,7 @@ Start the `yt-transcript-local` server before opening YouTube so transcript call
    - Choose provider (OpenAI, Anthropic, OpenAI-compatible) and set base URL, model, API key, optional Anthropic version, and concurrency.
    - Pick a style preset or customize the prompt template (`{{style}}`, `{{outlang}}`, `{{currentLine}}`, `{{prevLines}}`, `{{nextLines}}` placeholders).
    - Enable **ASCII-only** and define a blocklist if you need sanitized output.
-   - Toggle **Single call** if you prefer one request per transcript; the extension now auto-chunks the payload into sub-two-minute groups so providers stay responsive. Use **Stop** to abort via the service worker.
+   - **Single call** is enabled by default; the extension auto-chunks the payload into sub-minute groups so providers stay responsive. Use **Stop** to abort via the service worker.
 6. Review restyled text inline. The transcript list highlights the active segment as the video plays; clicking a row seeks the video.
 7. (Optional) Enable **TTS**:
     - Choose provider (OpenAI/OpenAI-compatible/Azure/Kokoro/Browser).

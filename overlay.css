@@ -165,7 +165,11 @@
 #yt-transcript-overlay.yt-overlay-parked .yt-overlay-content {
   max-height: calc(100vh - 280px);
   overflow-y: auto;
-  padding-bottom: 16px;
+  padding-bottom: 56px;
+}
+
+#yt-transcript-overlay.yt-overlay-parked .yt-overlay-content .yt-section:last-child {
+  margin-bottom: 24px;
 }
 
 /* Sections */

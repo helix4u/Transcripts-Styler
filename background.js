@@ -471,7 +471,7 @@ async function callOpenAI(baseUrl, apiKey, model, systemPrompt, userPrompt, asci
   const body = {
     model,
     messages,
-    max_tokens: Number.isFinite(Number(maxTokens)) ? Number(maxTokens) : 1000,
+    max_tokens: Number.isFinite(Number(maxTokens)) ? Number(maxTokens) : 8192,
     temperature: Number.isFinite(Number(temperature)) ? Number(temperature) : 0.7
   };
 
@@ -503,7 +503,7 @@ async function callAnthropic(baseUrl, apiKey, model, systemPrompt, userPrompt, v
 
   const body = {
     model,
-    max_output_tokens: Number.isFinite(Number(maxTokens)) ? Number(maxTokens) : 1000,
+    max_output_tokens: Number.isFinite(Number(maxTokens)) ? Number(maxTokens) : 8192,
     temperature: Number.isFinite(Number(temperature)) ? Number(temperature) : 0.7,
     messages: [
       {
@@ -570,7 +570,7 @@ async function callOpenAICompatible(
   const body = {
     model,
     messages,
-    max_tokens: Number.isFinite(Number(maxTokens)) ? Number(maxTokens) : 1000,
+    max_tokens: Number.isFinite(Number(maxTokens)) ? Number(maxTokens) : 8192,
     temperature: Number.isFinite(Number(temperature)) ? Number(temperature) : 0.7
   };
 
