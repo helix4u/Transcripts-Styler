@@ -1,167 +1,51 @@
 # Transcript Styler
 
-Transcript Styler is a Manifest V3 Chrome extension that extracts YouTube captions, restyles them with LLMs, and optionally produces spoken output with TTS services. The repository also bundles a lightweight FastAPI helper (`yt-transcript-local`) that exposes a local transcript API the extension can use when the YouTube endpoints are slow or blocked.
+Bring YouTube captions into an AI-first transcript hub. Transcript Styler pairs a Chrome extension with a lightweight FastAPI helper so you can capture, restyle, narrate, and export transcripts without leaving the watch page.
 
-## Feature Highlights
-- Captions retrieved exclusively through the bundled FastAPI helper (`yt-transcript-local`), which resolves tracks and returns timestamped segments for the UI overlay.
-- In-page overlay for detecting the current video, listing caption tracks, fetching transcripts, and previewing both original and AI-restyled text.
-- Prompt-driven LLM restyling pipeline with configurable provider (OpenAI, Anthropic, OpenAI-compatible), base URL override, model name, concurrency, ASCII-only enforcement, and reusable style presets.
-- Single-call restyling automatically chunks transcripts into sub-minute groups so LLM prompts stay focused and predictable.
-- Transcript workspace with search, active segment highlighting synced to playback, click-to-seek support, preset management, and an injected subtitle overlay on top of the YouTube player.
-- Dockable overlay with a one-click toggle: float it anywhere, snap it into the native transcript panel, and persist both the overlay position and subtitle vertical offset slider per user prefs.
-- Multi-provider TTS support (OpenAI, OpenAI-compatible, Azure, Kokoro, and on-device browser SpeechSynthesis), including Azure voice discovery and download-ready audio blobs.
-- Adjustable auto-TTS guard slider that keeps the video playing with only minimal pauses while generated audio catches up.
-- One-click exports for TXT, SRT, VTT, and JSON that include both the original and restyled text as applicable.
-- Persistent preferences stored in `chrome.storage.local` (`ytro_*` keys) with explicit `savePrefs()` calls wired to every control.
-- Debug logging toggle that surfaces `[TS-UI]` and `[TS-BG]` traces alongside service worker logs in `chrome://extensions/?errors=...`.
+> **Beta 0.4.1** — stable for everyday use, still polishing onboarding and provider coverage. Expect quick iteration.
 
-## Architecture at a Glance
-- `content.js` injects the overlay UI on `youtube.com/watch` pages, parses player JSON to collect caption tracks, renders transcript segments, orchestrates restyle/TTS batches, and syncs UI state with storage.
-- `background.js` is the MV3 service worker that brokers network calls: asks the local helper for track lists and transcripts, calls LLM/TTS providers, fetches Azure voice metadata, and manages shared preferences with abort support.
-- `overlay.css` styles the floating control panel and the subtitle overlay injected into the YouTube video player. Theme tokens are defined via CSS custom properties for dark/light/system modes.
-- `manifest.json` declares MV3 metadata, permissions (`storage` plus `<all_urls>` host access for API calls), and binds the service worker and content script assets.
-- `yt-transcript-local/` is the FastAPI helper that powers transcript discovery. It exposes `/api/ping`, `/api/tracks`, and `/api/transcript`, plus a static UI (`index.html`) targeting `http://127.0.0.1:17653`.
+## Quick Start (Chrome)
+1. Clone or download this repository.
+2. Open chrome://extensions, enable Developer mode, choose Load unpacked, and point to the repo root.
+3. Start the local helper by running yt-transcript-local/start_server.bat on Windows or the shell recipe in yt-transcript-local/README.txt.
+4. Load a captioned YouTube video, open the overlay, and click List Tracks followed by Fetch Transcript.
 
-## Repository Layout
+See INSTALL.md for screenshots, provider setup tips, and fallback guidance.
 
-| Path | Description |
-| ---- | ----------- |
-| `README.md` | This documentation. |
-| `INSTALL.md` | Step-by-step installation and onboarding guide for Chrome. |
-| `LICENSE` | MIT license text. |
-| `agents.md` | Automation/agent operating guide (development workflow hints and environment notes). |
-| `manifest.json` | Chrome MV3 manifest pinned to version `0.4.1`. |
-| `background.js` | Service worker handling track discovery, transcript fetching, LLM/TTS calls, storage, and abort coordination. |
-| `background.js.bak` | Archived service worker snapshot kept for reference/diffing. |
-| `content.js` | Injected UI controller handling detection, rendering, restyle/TTS orchestration, exports, and user prefs. |
-| `overlay.css` | Styles for the overlay, transcript list, subtitle injection, themes, and inline status messaging. |
-| `icons/` | Extension icons (16/32/48/128 px) referenced by the manifest. |
-| `.eslintrc.json` | ESLint config targeting MV3 service workers and browser content scripts. |
-| `.prettierrc` | Prettier formatting rules (2-space indent, 100-char width, LF endings). |
-| `.gitignore` | Git ignore list covering build artifacts, local env files, and packaged zips. |
-| `package.json` | npm metadata, dev dependencies (`eslint`, `prettier`), browserslist, npm scripts, and feature flags. |
-| `package-lock.json` | Deterministic dependency lockfile. |
-| `node_modules/` | Installed dependencies (generated by `npm install`). |
-| `yt-transcript-local/index.html` | Standalone UI that connects to the local transcript API at `127.0.0.1:17653`. |
-| `yt-transcript-local/main.py` | FastAPI app exposing `/api/ping`, `/api/tracks`, and `/api/transcript` (with language selection and ASR fallback). |
-| `yt-transcript-local/requirements.txt` | Python dependencies (`fastapi`, `uvicorn`, `youtube-transcript-api`). |
-| `yt-transcript-local/start_server.bat` | Windows helper that creates a venv, installs requirements, and launches Uvicorn. |
-| `yt-transcript-local/README.txt` | Quick reference for the local backend (mirrors the GitHub Pages helper). |
-| `yt-transcript-local/.git/` | Embedded git metadata for the helper project (leave untouched). |
+## What You Can Do
+- Capture caption tracks through the bundled helper to dodge YouTube quota hiccups.
+- Restyle transcripts with OpenAI, Anthropic, or any OpenAI-compatible endpoint using presets or custom prompts.
+- Narrate with OpenAI, Azure Speech, Kokoro, or on-device browser voices, including auto-playback synced to video.
+- Export synchronized transcripts to TXT, SRT, VTT, or JSON while keeping the original wording.
+- Overlay original and restyled subtitles directly on the player with furigana support and draggable or dockable controls.
 
-## Setup
+## Companion Helper (yt-transcript-local)
+The helper exposes /api/ping, /api/tracks, and /api/transcript on http://127.0.0.1:17653. Keep it running during transcript tests. The included web UI (yt-transcript-local/index.html) confirms connectivity and subtitle availability.
 
-### Requirements
-- Chrome 88 or newer (Manifest V3 support).
-- Node.js 14+ and npm 6+ (per `package.json` engines).
-- Python 3.9+ to run the bundled local transcript API (required for transcript fetching).
-- API keys for your preferred LLM/TTS providers (OpenAI, Anthropic, Azure, etc.).
+## Product Walkthrough
+- Overlay header — detect the active video, list caption tracks, and fetch transcripts. Toggle debug logging or park the UI inside the native transcript panel.
+- Transcript workspace — search, click-to-seek, and review original or restyled sentences with persistent preferences.
+- Restyle and TTS panels — configure prompt presets, batching, and provider keys; queue auto-TTS for the currently selected sentence.
+- Exports — download transcript bundles on demand. Each export reflects the latest restyling state.
 
-### Install JavaScript Dependencies
-```bash
-npm install
-```
+## Documentation Map
+- INSTALL.md — install and configuration guide.
+- PROJECT_SUMMARY.md — architectural and feature overview.
+- agents.md — automation workflow and environment notes for contributors.
+- yt-transcript-local/README.txt — helper instructions.
 
-### Load the Extension for Development
-1. Open `chrome://extensions/`.
-2. Enable **Developer mode**.
-3. Click **Load unpacked** and choose the repository root (`Transcripts-Styler`).
-4. After code changes, click **Reload** on the extension card.
+## Development Loop
+- npm install
+- npx prettier --write background.js content.js
+- npm run lint
 
-### Start the Local Transcript API (required)
-- **Windows shortcut**: Double-click `yt-transcript-local/start_server.bat`. The script creates/activates `.venv`, installs requirements, and starts Uvicorn on `http://127.0.0.1:17653`.
-- **Manual steps**:
-  ```bash
-  cd yt-transcript-local
-  python -m venv .venv
-  .venv\Scripts\activate  # Windows
-  # or source .venv/bin/activate on Unix
-  pip install -r requirements.txt
-  uvicorn main:app --host 127.0.0.1 --port 17653 --workers 1
-  ```
+Reload the extension from chrome://extensions after code changes. Overlay logs appear as [TS-UI], service worker logs as [TS-BG] under chrome://extensions/?errors=<extension-id>.
 
-## Usage Walkthrough
-
-Start the `yt-transcript-local` server before opening YouTube so transcript calls succeed (`start_server.bat` or the manual steps above).
-
-1. Navigate to a YouTube video with captions. The overlay appears in the top-left corner.
-2. Click **Detect** to populate the video ID, then **List Tracks**. The UI merges results from the service worker, timedtext endpoints, and the parsed player JSON, sorted by your language preferences.
-3. Use the ⇲/⇱ dock toggle to snap the overlay into the native transcript panel or pop it back out. Drag or resize the floating panel as needed, and adjust the **Subtitle position** slider to move on-video captions. These preferences persist via `savePrefs()`.
-4. Select a caption track and click **Fetch Transcript**. Transcripts are fetched via `(a)` the local FastAPI helper if reachable, `(b)` the `yt.promptinject.me` scraper, or `(c)` timedtext/player endpoints. Text is parsed into segments and rendered in the transcript workspace.
-5. Configure restyling:
-   - Choose provider (OpenAI, Anthropic, OpenAI-compatible) and set base URL, model, API key, optional Anthropic version, and concurrency.
-   - Pick a style preset or customize the prompt template (`{{style}}`, `{{outlang}}`, `{{currentLine}}`, `{{prevLines}}`, `{{nextLines}}` placeholders).
-   - Enable **ASCII-only** and define a blocklist if you need sanitized output.
-   - **Single call** is enabled by default; the extension auto-chunks the payload into sub-minute groups so providers stay responsive. Use **Stop** to abort via the service worker.
-6. Review restyled text inline. The transcript list highlights the active segment as the video plays; clicking a row seeks the video.
-7. (Optional) Enable **TTS**:
-    - Choose provider (OpenAI/OpenAI-compatible/Azure/Kokoro/Browser).
-    - Provide voice, format, base URL, API key, and Azure region as needed. Fetch Azure voice catalogs via **Load Voices** in the UI.
-    - Set the **Minimal video pause** slider to keep the YouTube player nearly in sync with generated speech; zero means never pause, larger values briefly pause playback for the current chunk.
-   - Generate audio for the compiled transcript (first 4000 chars) and download the resulting blob, or use browser SpeechSynthesis for quick previews.
-8. Export via **Export TXT/SRT/VTT/JSON**. TXT includes restyled text when present; JSON captures metadata, restyled fields, timestamps, and export time.
-9. Save presets and preferences with the provided controls. All interactive controls call `savePrefs()` to persist into `chrome.storage.local`.
-
-## Configuration & Persistence
-
-- Preference keys live under `chrome.storage.local`:
-  - `ytro_prefs`: main settings (video ID, languages, provider info, prompt, ASCII flags, TTS config, overlay dock preference, subtitle offset slider, minimal video pause guard, etc.).
-  - `ytro_presets`: stored style/TTS presets (`window.ytPresets` mirror).
-  - `ytro_theme`: current overlay theme (`theme-dark`, `theme-light`, `theme-system`).
-  - `ytro_position`: overlay coordinates for drag-and-drop placement.
-  - `ytro_debug`: shared debug toggle used by both content and background scripts.
-- Debug logging can be toggled from the overlay header; service worker state is mirrored via `handleGetPrefs`/`handleSetPrefs`.
-
-## npm Scripts & Tooling
-
-| Script | Purpose |
-| ------ | ------- |
-| `npm run lint` | Lint `*.js` with ESLint (`standard` config with customized rules for MV3). |
-| `npm run format` | Format JS/JSON/MD/CSS with Prettier (LF endings, no trailing commas). |
-| `npm run build` | Run lint then format. |
-| `npm run package` | Create a zip archive excluding `node_modules`, `.git`, lockfiles, and existing zips. |
-| `npm run clean` | Remove `node_modules`, `package-lock.json`, and zip artifacts. |
-| `npm run dev` | Reminder to load the extension unpacked (no watcher). |
-
-Linting/formatting can also be run directly with:
-```bash
-npx eslint background.js content.js
-npx prettier --write background.js content.js
-```
-
-## Debugging & Troubleshooting
-
-- Enable **Debug Logging** in the overlay to see `[TS-UI]` traces in DevTools and `[TS-BG]` traces in the service worker console (`chrome://extensions/?errors=...`).
-- Use the built-in YouTube transcript panel to confirm captions exist if **List Tracks** reports none; refresh the page so the content script can re-parse the player JSON.
-- For transcript fetch failures, ensure the local API is reachable (ping `http://127.0.0.1:17653/api/ping`) and review the background logs for HTTP errors returned by the helper.
-- API errors (LLM/TTS) typically indicate missing keys, quota exhaustion, or incorrect base URLs; lower concurrency to 1 when debugging provider rate limits.
-- Browser TTS uses `speechSynthesis`; Chrome may require user interaction before playback.
-
-## Local Backend API
-
-| Endpoint | Method | Description |
-| -------- | ------ | ----------- |
-| `/api/ping` | GET | Health check returning `{ ok: true, service, version }`. |
-| `/api/tracks` | GET | Lists available caption tracks with language metadata. Query params: `url` or `videoId`. |
-| `/api/transcript` | GET | Returns transcript segments with query params:<br>`url` or `videoId`, `lang` comma list, `prefer_asr` (bool), `format` (`segments` or `txt`), `preserve_formatting` (bool). The extension requests `format=segments`. |
-
-The helper accepts both full URLs (`https://www.youtube.com/watch?v=...`) and bare video IDs. Fallback order is manual transcripts -> generated transcripts -> language fallback, matching the logic in `main.py`.
-
-## Additional Documentation
-
-- `INSTALL.md` covers the full installation flow, troubleshooting checklist, and provider onboarding.
-- `yt-transcript-local/README.txt` documents the helper service and UI usage.
-- `agents.md` summarizes automation workflows, environment expectations, and repo conventions for Codex/agent contributors.
+## Troubleshooting Highlights
+- Transcript fetch fails? Confirm the helper is running (check /api/ping) and captions exist in the YouTube transcript panel.
+- No overlay? Refresh the watch page and verify the extension is enabled.
+- Provider errors? Double-check keys, base URLs, and concurrency; try single-request mode while debugging.
+- TTS silent? Browser voices need a user gesture and may fail with Unicode when ASCII-only is enabled.
 
 ## License
-
-[MIT](LICENSE)
-
-
-
-
-
-
-
-
-
+MIT — see LICENSE.

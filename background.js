@@ -1,5 +1,5 @@
 // Transcript Styler - Background Service Worker
-// v0.4.0-test with comprehensive logging and debug features
+// v0.4.1-beta with comprehensive logging and debug features
 
 // Global debug state
 let DEBUG_ENABLED = false;

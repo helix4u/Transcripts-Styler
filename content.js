@@ -1,5 +1,5 @@
 // Transcript Styler - Content Script
-// v0.4.0-test with comprehensive features and logging
+// v0.4.1-beta with comprehensive features and logging
 
 // Only inject on YouTube watch pages
 if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
@@ -316,7 +316,7 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
   overlay.id = 'yt-transcript-overlay';
   overlay.innerHTML = `
   <div class="yt-overlay-header">
-    <span class="yt-overlay-title">Transcript Styler v0.4.0-test</span>
+    <span class="yt-overlay-title">Transcript Styler v0.4.1 Beta</span>
     <div class="yt-overlay-controls">
       <button id="yt-dock-toggle" title="Dock in transcript">⇆</button>
       <label><input type="checkbox" id="yt-debug-toggle"> Debug Logging</label>
