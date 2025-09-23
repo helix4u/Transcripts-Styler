@@ -105,7 +105,8 @@
 #yt-transcript-overlay.yt-overlay-parked .yt-overlay-header {
   cursor: default;
   position: sticky;
-  top: 0;
+  top: -6px;
+  padding-top: 14px;
   z-index: 2;
 }
 

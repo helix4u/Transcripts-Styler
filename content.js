@@ -330,10 +330,9 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
     <div class="yt-section">
       <h4>Video Detection</h4>
       <div class="yt-controls">
-        <input type="text" id="yt-video-id" placeholder="Auto-detected video ID">
-        <button id="yt-detect-btn">Detect</button>
-        <button id="yt-list-tracks-btn">List Tracks</button>
-        <button id="yt-fetch-transcript-btn">Fetch Transcript</button>
+        <input type="text" id="yt-video-id" placeholder="Auto-detected video ID" style="flex: 1 1 35%; min-width: 140px; max-width: 220px; margin-right: 8px;">
+        <button id="yt-refresh-tracks-btn" title="Detect video and refresh caption tracks">Detect + List</button>
+        <button id="yt-fetch-transcript-btn" title="Fetch transcript for selected track">Fetch</button>
       </div>
       <select id="yt-track-select" style="width: 100%; margin-top: 5px;">
         <option value="">Select a track...</option>
@@ -559,6 +558,8 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
       </div>
       <div class="yt-controls">
         <label><input type="checkbox" id="yt-furigana"> Show furigana for Japanese text</label>
+      </div>
+      <div class="yt-controls">
         <label><input type="checkbox" id="yt-show-both"> Show both original and styled text over video</label>
       </div>
       <div class="yt-controls">
@@ -1060,8 +1061,7 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
     dockToggle: document.getElementById('yt-dock-toggle'),
 
     videoId: document.getElementById('yt-video-id'),
-    detectBtn: document.getElementById('yt-detect-btn'),
-    listTracksBtn: document.getElementById('yt-list-tracks-btn'),
+    refreshTracksBtn: document.getElementById('yt-refresh-tracks-btn'),
     fetchTranscriptBtn: document.getElementById('yt-fetch-transcript-btn'),
     trackSelect: document.getElementById('yt-track-select'),
 
@@ -3501,6 +3501,17 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
       setError(`Failed to list tracks: ${error.message}`);
     }
   }
+
+  async function detectAndListTracks() {
+    const existingValue = (elements.videoId.value || '').trim();
+    if (!existingValue) {
+      const detectedId = detectVideoId();
+      if (!detectedId) {
+        return;
+      }
+    }
+    await listTracks();
+  }
   // Transcript fetching
   async function fetchTranscript() {
     const start = Date.now();
@@ -4696,8 +4707,14 @@ ${text}
     });
   }
 
-  elements.detectBtn.addEventListener('click', detectVideoId);
-  elements.listTracksBtn.addEventListener('click', listTracks);
+  if (elements.refreshTracksBtn) {
+    elements.refreshTracksBtn.addEventListener('click', () => {
+      detectAndListTracks().catch(error => {
+        logError('detectAndListTracks failed:', error);
+        setError(error.message || 'Failed to detect and list tracks');
+      });
+    });
+  }
   elements.fetchTranscriptBtn.addEventListener('click', fetchTranscript);
 
   elements.themeSelect.addEventListener('change', () => {

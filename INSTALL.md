@@ -37,9 +37,9 @@ Keep this process running any time you fetch transcripts.
 
 ## 4. First-Run Checklist
 1. Navigate to a YouTube watch page with captions enabled.
-2. Use Detect to grab the video ID.
-3. Click List Tracks and choose a caption track.
-4. Press Fetch Transcript to populate the overlay and subtitle panel.
+2. Click Detect + List to populate the video ID field and caption dropdown.
+3. Choose a caption track from the dropdown.
+4. Press Fetch to populate the overlay and subtitle panel.
 5. Toggle Show both original and styled text if you want dual subtitles over the video.
 
 ## Provider Configuration

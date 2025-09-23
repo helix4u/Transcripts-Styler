@@ -8,7 +8,7 @@ Bring YouTube captions into an AI-first transcript hub. Transcript Styler pairs 
 1. Clone or download this repository.
 2. Open chrome://extensions, enable Developer mode, choose Load unpacked, and point to the repo root.
 3. Start the local helper by running yt-transcript-local/start_server.bat on Windows or the shell recipe in yt-transcript-local/README.txt.
-4. Load a captioned YouTube video, open the overlay, and click List Tracks followed by Fetch Transcript.
+4. Load a captioned YouTube video, open the overlay, and click Detect + List followed by Fetch.
 
 See INSTALL.md for screenshots, provider setup tips, and fallback guidance.
 
@@ -23,7 +23,7 @@ See INSTALL.md for screenshots, provider setup tips, and fallback guidance.
 The helper exposes /api/ping, /api/tracks, and /api/transcript on http://127.0.0.1:17653. Keep it running during transcript tests. The included web UI (yt-transcript-local/index.html) confirms connectivity and subtitle availability.
 
 ## Product Walkthrough
-- Overlay header — detect the active video, list caption tracks, and fetch transcripts. Toggle debug logging or park the UI inside the native transcript panel.
+- Overlay header — use Detect + List to capture the active video, populate caption choices, and then fetch transcripts. Toggle debug logging or park the UI inside the native transcript panel.
 - Transcript workspace — search, click-to-seek, and review original or restyled sentences with persistent preferences.
 - Restyle and TTS panels — configure prompt presets, batching, and provider keys; queue auto-TTS for the currently selected sentence.
 - Exports — download transcript bundles on demand. Each export reflects the latest restyling state.
