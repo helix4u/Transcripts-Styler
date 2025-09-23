@@ -4,7 +4,8 @@
 // Only inject on YouTube watch pages
 if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
   // Global state
-  let transcriptData = [];
+  let transcriptData = []; // Original segments
+  let sentenceData = []; // Parsed sentences
   let aborter = null;
   let UI_DEBUG = false;
   const lastPrefs = {};
@@ -36,14 +37,214 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
   let overlayDockPreferred = false;
   let subtitleOffsetPercent = 12;
   let guardPauseMs = 800;
-  const SINGLE_CALL_MAX_CHUNK_SECONDS = 60;
+  const SINGLE_CALL_MAX_CHUNK_SECONDS = 600;
   let manualTranscriptScroll = false;
   let manualScrollResetId = null;
   const MANUAL_SCROLL_RESET_MS = 2500;
   let autoScrollEnabled = false;
   let subtitleTimingOffsetMs = 0;
+  let extensionEnabled = true;
 
   const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+  const SENTENCE_BOUNDARY_CHARS = new Set(['.', '!', '?', '。', '！', '？', '…']);
+  const SENTENCE_TRAILING_CHARS = new Set([
+    '"',
+    "'",
+    '”',
+    '’',
+    ')',
+    '）',
+    ']',
+    '］',
+    '}',
+    '】',
+    '〉',
+    '》',
+    '」',
+    '』',
+    '＞',
+    '>'
+  ]);
+
+  function normalizeSegmentText(text) {
+    if (!text) return '';
+    return `${text}`.replace(/\s+/g, ' ').trim();
+  }
+
+  function parseTranscriptIntoSentences(segments) {
+    if (!Array.isArray(segments) || !segments.length) return [];
+
+    const timeline = [];
+
+    segments.forEach((segment, index) => {
+      const normalizedText = normalizeSegmentText(segment.text);
+      if (!normalizedText) {
+        return;
+      }
+
+      const startTime = Number(segment.start) || 0;
+      const rawEndTime = Number(segment.end);
+      const rawDuration = Number(segment.duration);
+
+      let duration = Number.isFinite(rawDuration) && rawDuration >= 0 ? rawDuration : NaN;
+      let endTime = Number.isFinite(rawEndTime) ? rawEndTime : NaN;
+
+      if (!Number.isFinite(duration)) {
+        duration = Number.isFinite(endTime) ? Math.max(0, endTime - startTime) : 0;
+      }
+
+      if (!Number.isFinite(endTime)) {
+        endTime = startTime + duration;
+      } else {
+        endTime = Math.max(startTime, endTime);
+      }
+
+      const charCount = normalizedText.length;
+      const step = charCount > 1 && duration > 0 ? duration / (charCount - 1) : 0;
+
+      for (let i = 0; i < charCount; i += 1) {
+        const char = normalizedText[i];
+        const timestamp =
+          duration > 0
+            ? charCount === 1
+              ? startTime
+              : startTime + step * i
+            : startTime;
+        timeline.push({
+          char,
+          segmentIndex: index,
+          time: Number.isFinite(timestamp) ? timestamp : startTime
+        });
+      }
+
+      if (!/\s$/.test(normalizedText)) {
+        timeline.push({
+          char: ' ',
+          segmentIndex: index,
+          time: endTime
+        });
+      }
+    });
+
+    const sentences = [];
+    let buffer = '';
+    let sentenceStartTime = null;
+    let sentenceEndTime = null;
+    let lastCharWasSpace = false;
+    let segmentIndexes = new Set();
+
+    const commitSentence = () => {
+      const trimmed = buffer.trim();
+      const compact = trimmed.replace(/\s+/g, '');
+      if (!compact || compact.length < 2) {
+        buffer = '';
+        sentenceStartTime = null;
+        sentenceEndTime = null;
+        lastCharWasSpace = false;
+        segmentIndexes = new Set();
+        return;
+      }
+
+      const orderedSegments = Array.from(segmentIndexes).sort((a, b) => a - b);
+      const firstSegmentIndex = orderedSegments.length ? orderedSegments[0] : -1;
+      const start =
+        sentenceStartTime ??
+        (firstSegmentIndex >= 0 ? Number(segments[firstSegmentIndex]?.start) || 0 : 0);
+      const end = sentenceEndTime ?? start;
+
+      sentences.push({
+        index: sentences.length,
+        originalSegmentIndex: firstSegmentIndex,
+        segmentIndexes: orderedSegments,
+        start,
+        end,
+        duration: Math.max(0, end - start),
+        text: trimmed,
+        restyled: null,
+        error: null
+      });
+
+      buffer = '';
+      sentenceStartTime = null;
+      sentenceEndTime = null;
+      lastCharWasSpace = false;
+      segmentIndexes = new Set();
+    };
+
+    for (let i = 0; i < timeline.length; i += 1) {
+      const entry = timeline[i];
+      const rawChar = entry.char;
+      const isWhitespace = /\s/.test(rawChar);
+      const isBoundary = SENTENCE_BOUNDARY_CHARS.has(rawChar);
+
+      if (!buffer.length && isWhitespace) {
+        continue;
+      }
+
+      if (lastCharWasSpace && isWhitespace) {
+        continue;
+      }
+
+      const charToAppend = isWhitespace ? ' ' : rawChar;
+      buffer += charToAppend;
+
+      if (sentenceStartTime === null) {
+        sentenceStartTime = entry.time;
+      }
+
+      if (entry.segmentIndex !== undefined && entry.segmentIndex !== null) {
+        segmentIndexes.add(entry.segmentIndex);
+      }
+
+      if (!isWhitespace) {
+        sentenceEndTime = entry.time;
+        lastCharWasSpace = false;
+      } else {
+        lastCharWasSpace = true;
+      }
+
+      if (isBoundary) {
+        let j = i + 1;
+        while (j < timeline.length) {
+          const nextEntry = timeline[j];
+          const nextChar = nextEntry.char;
+          const nextIsWhitespace = /\s/.test(nextChar);
+          const nextIsTrailing = SENTENCE_TRAILING_CHARS.has(nextChar);
+
+          if (!nextIsWhitespace && !nextIsTrailing) {
+            break;
+          }
+
+          if (nextIsWhitespace) {
+            if (!lastCharWasSpace) {
+              buffer += ' ';
+              lastCharWasSpace = true;
+            }
+          } else {
+            buffer += nextChar;
+            sentenceEndTime = nextEntry.time;
+            lastCharWasSpace = false;
+          }
+
+          if (nextEntry.segmentIndex !== undefined && nextEntry.segmentIndex !== null) {
+            segmentIndexes.add(nextEntry.segmentIndex);
+          }
+
+          j += 1;
+        }
+
+        i = j - 1;
+        commitSentence();
+      }
+    }
+
+    if (buffer.trim().length) {
+      commitSentence();
+    }
+
+    return sentences;
+  }
 
   async function waitForElement(selector, options = {}) {
     const { root = document, timeout = 10000, checkInterval = 100 } = options;
@@ -239,6 +440,11 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
         <label><input type="checkbox" id="yt-single-call" checked> Single-call restyle</label>
       </div>
       <div class="yt-controls">
+        <label style="flex: 1;">Chunk duration (minutes):</label>
+        <input type="number" id="yt-chunk-duration" min="1" max="60" value="10" step="1" style="flex: 2; width: 80px;">
+        <span id="yt-chunk-duration-value">10 min</span>
+      </div>
+      <div class="yt-controls">
         <label>ASCII Blocklist:</label>
         <input type="text" id="yt-blocklist" placeholder="Additional characters to avoid" style="width: 100%;">
       </div>
@@ -370,6 +576,49 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
 
   // Append overlay to page
   document.body.appendChild(overlay);
+  overlay.style.display = 'none';
+  overlay.setAttribute('aria-hidden', 'true');
+
+  function applyExtensionEnabledState(enabled) {
+    const previousState = extensionEnabled;
+    const resolved = Boolean(enabled);
+    extensionEnabled = resolved;
+    const stateChanged = resolved !== previousState;
+
+    if (!overlay.isConnected) {
+      document.body.appendChild(overlay);
+    }
+
+    if (!resolved) {
+      if (overlayParked) {
+        unparkOverlay();
+      }
+      overlay.style.display = 'none';
+      overlay.setAttribute('aria-hidden', 'true');
+      updateSubtitleText(null);
+      resetSubtitleState();
+      if (subtitleOverlayEl && subtitleOverlayEl.isConnected) {
+        subtitleOverlayEl.remove();
+      }
+      releaseAutoTtsGuard({ resumeVideo: true });
+      stopRestyle();
+      stopTTS().catch(() => {});
+      return;
+    }
+
+    overlay.style.display = 'block';
+    overlay.setAttribute('aria-hidden', 'false');
+
+    if (overlayDockPreferred) {
+      attemptParkOverlay();
+    }
+
+    ensureVideoListeners();
+
+    if (stateChanged || !elements.videoId.value) {
+      detectVideoId();
+    }
+  }
 
   function findTranscriptToggleButton() {
     return (
@@ -479,6 +728,7 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
   }
 
   async function attemptParkOverlay() {
+    if (!extensionEnabled) return;
     if (!overlayDockPreferred) return;
     if (overlayParked) return;
 
@@ -543,17 +793,17 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
   }
 
   async function playSegmentTTS(segmentIndex, textType) {
-    if (!transcriptData || segmentIndex < 0 || segmentIndex >= transcriptData.length) {
+    if (!sentenceData || segmentIndex < 0 || segmentIndex >= sentenceData.length) {
       return;
     }
 
-    const segment = transcriptData[segmentIndex];
+    const sentence = sentenceData[segmentIndex];
     let textToSpeak = '';
 
     if (textType === 'original') {
-      textToSpeak = segment.text || '';
+      textToSpeak = sentence.text || '';
     } else if (textType === 'restyled') {
-      textToSpeak = segment.restyled || '';
+      textToSpeak = sentence.restyled || '';
     }
 
     log(`TTS input - segment ${segmentIndex}, type: ${textType}, text: "${textToSpeak}"`);
@@ -838,6 +1088,8 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
     asciiOnly: document.getElementById('yt-ascii-only'),
     blocklist: document.getElementById('yt-blocklist'),
     singleCall: document.getElementById('yt-single-call'),
+    chunkDuration: document.getElementById('yt-chunk-duration'),
+    chunkDurationValue: document.getElementById('yt-chunk-duration-value'),
     maxTokens: document.getElementById('yt-max-tokens'),
     temperature: document.getElementById('yt-temperature'),
     styleText: document.getElementById('yt-style-text'),
@@ -899,13 +1151,13 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
   // Default values
   const DEFAULT_PROMPT = `Restyle this closed-caption sentence fragment in {{style}} style. Output language: {{outlang}}. This input is a partial sentence from on-screen captions. Keep the meaning intact but improve clarity and readability for captions. Keep sentence pacing etc. Just change verbiage and vibe. It will play alongside the youtube vid in CCs. Do not include timestamps, time ranges, or any numerals that are part of time markers; ignore them entirely. Do not add speaker names or extra content. If ASCII-only mode is enabled, use only standard ASCII characters (no accents, special punctuation, or Unicode symbols).
 
-Context (previous fragments):
+\nContext (previous fragments you that you've already written):
 {{prevLines}}
 
-Current fragment to restyle:
+\n The current closed caption fragment to restyle:
 {{currentLine}}
 
-Context (next fragments):
+\nContext (next CC fragments that you must bleed your speech into so that the next CC fragment makes sense):
 {{nextLines}}`;
 
   const DEFAULT_TTS_SETTINGS = {
@@ -1108,11 +1360,25 @@ Context (next fragments):
     const start = Date.now();
     try {
       const response = await sendMessage('GET_PREFS', {
-        keys: ['ytro_prefs', 'ytro_presets', 'ytro_debug', 'ytro_theme', 'ytro_position']
+        keys: [
+          'ytro_prefs',
+          'ytro_presets',
+          'ytro_debug',
+          'ytro_theme',
+          'ytro_position',
+          'ytro_extension_enabled'
+        ]
       });
 
       if (response.success) {
-        const { ytro_prefs, ytro_presets, ytro_debug, ytro_theme, ytro_position } = response.data;
+        const {
+          ytro_prefs,
+          ytro_presets,
+          ytro_debug,
+          ytro_theme,
+          ytro_position,
+          ytro_extension_enabled
+        } = response.data;
 
         // Apply debug setting
         if (ytro_debug !== undefined) {
@@ -1156,6 +1422,11 @@ Context (next fragments):
           setIf(elements.asciiOnly, ytro_prefs.asciiOnly, 'checked');
           setIf(elements.blocklist, ytro_prefs.blocklist);
           setIf(elements.singleCall, ytro_prefs.singleCall, 'checked');
+          setIf(elements.chunkDuration, ytro_prefs.chunkDuration);
+          if (elements.chunkDuration && elements.chunkDurationValue) {
+            const minutes = parseInt(elements.chunkDuration.value, 10) || 10;
+            elements.chunkDurationValue.textContent = `${minutes} min`;
+          }
           setIf(elements.maxTokens, ytro_prefs.maxTokens);
           setIf(elements.temperature, ytro_prefs.temperature);
           setIf(elements.styleText, ytro_prefs.styleText);
@@ -1228,10 +1499,17 @@ Context (next fragments):
         window.ytPresets = ytro_presets || {};
         rebuildPresetOptions();
 
+        const resolvedEnabled =
+          ytro_extension_enabled === undefined ? true : Boolean(ytro_extension_enabled);
+        applyExtensionEnabledState(resolvedEnabled);
+
         log(`Preferences loaded in ${dur(start)}`);
+      } else {
+        applyExtensionEnabledState(true);
       }
     } catch (error) {
       logError('Failed to load preferences:', error);
+      applyExtensionEnabledState(true);
     }
   }
 
@@ -1264,6 +1542,7 @@ Context (next fragments):
       asciiOnly: elements.asciiOnly.checked,
       blocklist: elements.blocklist.value,
       singleCall: elements.singleCall.checked,
+      chunkDuration: parseInt(elements.chunkDuration?.value, 10) || 10,
       maxTokens: parseInt(elements.maxTokens?.value, 10) || 8192,
       temperature: parseFloat(elements.temperature?.value) || 0.4,
       styleText: elements.styleText?.value || '',
@@ -1384,6 +1663,10 @@ Context (next fragments):
 
   // Parsing functions
   function ensureSubtitleOverlay() {
+    if (!extensionEnabled) {
+      return null;
+    }
+
     if (!subtitleOverlayEl) {
       subtitleOverlayEl = document.createElement('div');
       subtitleOverlayEl.id = 'ts-video-subtitles';
@@ -1426,17 +1709,24 @@ Context (next fragments):
 
       let textToShow = '';
 
-      if (elements.showBoth?.checked && originalText && restyledText) {
+      if (elements.showBoth?.checked) {
         // Show both original and restyled text
         const displayOriginal = elements.furigana?.checked
           ? generateFurigana(originalText)
           : originalText;
-        const displayRestyled = elements.furigana?.checked
+        const displayRestyled = restyledText && elements.furigana?.checked
           ? generateFurigana(restyledText)
           : restyledText;
 
-        textToShow = `<div class="subtitle-original">${displayOriginal}</div><div class="subtitle-restyled">${displayRestyled}</div>`;
+        if (originalText && restyledText) {
+          textToShow = `<div class="subtitle-original">${displayOriginal}</div><div class="subtitle-restyled">${displayRestyled}</div>`;
+        } else if (originalText) {
+          textToShow = `<div class="subtitle-original">${displayOriginal}</div>`;
+        } else if (restyledText) {
+          textToShow = `<div class="subtitle-restyled">${displayRestyled}</div>`;
+        }
         overlay.innerHTML = textToShow;
+        log(`[TS-UI] Show both mode: original="${originalText}", restyled="${restyledText}"`);
       } else {
         // Show only one text (prefer restyled if available)
         textToShow = restyledText || originalText;
@@ -1446,6 +1736,7 @@ Context (next fragments):
         } else {
           overlay.textContent = textToShow;
         }
+        log(`[TS-UI] Single mode: showBoth=${elements.showBoth?.checked}, text="${textToShow}"`);
       }
 
       overlay.style.display = textToShow ? 'block' : 'none';
@@ -1525,6 +1816,7 @@ Context (next fragments):
   }
 
   function ensureVideoListeners() {
+    if (!extensionEnabled) return;
     const video = getVideoElement();
     if (!video || videoListenerAttached) return;
     video.addEventListener('timeupdate', () => {
@@ -1547,30 +1839,35 @@ Context (next fragments):
   }
 
   function findSegmentIndex(time) {
-    if (!Array.isArray(transcriptData) || !transcriptData.length) return -1;
+    if (!Array.isArray(sentenceData) || !sentenceData.length) return -1;
     const shiftSeconds = subtitleTimingOffsetMs / 1000;
-    for (let i = 0; i < transcriptData.length; i += 1) {
-      const segment = transcriptData[i];
-      const startRaw = typeof segment.start === 'number' ? segment.start : 0;
+    for (let i = 0; i < sentenceData.length; i += 1) {
+      const sentence = sentenceData[i];
+      const startRaw = typeof sentence.start === 'number' ? sentence.start : 0;
       const start = startRaw + shiftSeconds;
       const nextStartRaw =
-        typeof transcriptData[i + 1]?.start === 'number'
-          ? transcriptData[i + 1].start
+        typeof sentenceData[i + 1]?.start === 'number'
+          ? sentenceData[i + 1].start
           : Number.POSITIVE_INFINITY;
       const endRawCandidate =
-        typeof segment.end === 'number' ? segment.end : Math.min(nextStartRaw, startRaw + 6);
+        typeof sentence.end === 'number' ? sentence.end : Math.min(nextStartRaw, startRaw + 6);
       const end = endRawCandidate + shiftSeconds;
       if (time + 0.05 >= start && time <= end + 0.05) {
         return i;
       }
     }
-    return time >= ((transcriptData[transcriptData.length - 1]?.start || 0) + shiftSeconds)
-      ? transcriptData.length - 1
+    return time >= ((sentenceData[sentenceData.length - 1]?.start || 0) + shiftSeconds)
+      ? sentenceData.length - 1
       : -1;
   }
 
   async function updateActiveSegment(currentTime) {
-    if (!transcriptData.length) {
+    if (!extensionEnabled) {
+      resetSubtitleState();
+      return;
+    }
+
+    if (!sentenceData.length) {
       resetSubtitleState();
       return;
     }
@@ -1600,10 +1897,15 @@ Context (next fragments):
       activeSegmentIndex = index;
       applyActiveHighlight(true); // Enable auto-scroll
       if (index >= 0) {
-        updateSubtitleText(transcriptData[index]);
+        const sentence = sentenceData[index];
+        if (sentence) {
+          updateSubtitleText(sentence);
+        } else {
+          updateSubtitleText(null);
+        }
 
         // Auto-play TTS if enabled and this is a new segment
-        if (autoTtsEnabled && index !== lastAutoTtsSegment && index < transcriptData.length) {
+        if (autoTtsEnabled && index !== lastAutoTtsSegment && index < sentenceData.length) {
           lastAutoTtsSegment = index;
           const textType = elements.autoTtsType?.value || 'restyled';
 
@@ -1690,23 +1992,23 @@ Context (next fragments):
     }
   }
 
-  function renderList(segments = transcriptData, searchTerm = '') {
-    if (!Array.isArray(segments)) return;
+  function renderList(sentences = sentenceData, searchTerm = '') {
+    if (!Array.isArray(sentences)) return;
 
     const filtered = searchTerm
-      ? segments.filter(s => s.text?.toLowerCase().includes(searchTerm.toLowerCase()))
-      : segments;
+      ? sentences.filter(s => s.text?.toLowerCase().includes(searchTerm.toLowerCase()))
+      : sentences;
 
     elements.transcriptList.innerHTML = filtered
-      .map((segment, i) => {
-        const originalIndex = segments.indexOf(segment);
-        const timeStr = segment.start ? formatTime(segment.start) : '';
-        const restyled = segment.restyled || '';
+      .map((sentence, i) => {
+        const originalIndex = sentence.index;
+        const timeStr = sentence.start ? formatTime(sentence.start) : '';
+        const restyled = sentence.restyled || '';
 
         // Apply furigana if enabled
         const originalText = elements.furigana?.checked
-          ? generateFurigana(segment.text)
-          : escapeHtml(segment.text);
+          ? generateFurigana(sentence.text)
+          : escapeHtml(sentence.text);
         const restyledText = restyled
           ? elements.furigana?.checked
             ? generateFurigana(restyled)
@@ -1714,10 +2016,20 @@ Context (next fragments):
           : '';
 
         return `
-      <div class="yt-transcript-item" data-index="${originalIndex}" data-start="${segment.start ?? 0}">
+      <div class="yt-transcript-item" data-index="${originalIndex}" data-start="${sentence.start ?? 0}">
         <div class="yt-transcript-time">${timeStr}</div>
         <div class="yt-transcript-text">
-          <div class="yt-original">
+          ${
+            elements.showBoth?.checked && restyled
+              ? `<div class="yt-original">
+            <span class="yt-speaker-icon" title="Play original text" data-segment-index="${originalIndex}" data-text-type="original">🔊</span>
+            ${originalText}
+          </div>
+          <div class="yt-restyled">
+            <span class="yt-speaker-icon" title="Play restyled text" data-segment-index="${originalIndex}" data-text-type="restyled">🔊</span>
+            ${restyledText}
+          </div>`
+              : `<div class="yt-original">
             <span class="yt-speaker-icon" title="Play original text" data-segment-index="${originalIndex}" data-text-type="original">🔊</span>
             ${originalText}
           </div>
@@ -1728,6 +2040,7 @@ Context (next fragments):
             ${restyledText}
           </div>`
               : ''
+          }`
           }
         </div>
       </div>
@@ -3257,12 +3570,13 @@ Context (next fragments):
       }
 
       transcriptData = normalized;
+      sentenceData = parseTranscriptIntoSentences(normalized);
       renderList();
       resetSubtitleState();
       ensureVideoListeners();
 
-      setStatus(`Transcript loaded: ${transcriptData.length} segments in ${dur(start)}`);
-      log(`Parsed ${transcriptData.length} segments`);
+      setStatus(`Transcript loaded: ${transcriptData.length} segments, ${sentenceData.length} sentences in ${dur(start)}`);
+      log(`Parsed ${transcriptData.length} segments into ${sentenceData.length} sentences`);
       return true;
     } catch (error) {
       setError(`Failed to fetch transcript: ${error.message}`);
@@ -3294,14 +3608,16 @@ Context (next fragments):
 
     // Single-call mode: one LLM request for the entire transcript
     if (elements.singleCall && elements.singleCall.checked) {
-      transcriptData.forEach(segment => {
-        delete segment.restyled;
-        delete segment.error;
+      sentenceData.forEach(sentence => {
+        delete sentence.restyled;
+        delete sentence.error;
       });
 
-      const chunks = chunkTranscriptByDuration(transcriptData, 120);
+      const chunkDurationMinutes = parseInt(elements.chunkDuration.value, 10) || 10;
+      const chunkDurationSeconds = chunkDurationMinutes * 60;
+      const chunks = chunkTranscriptByDuration(sentenceData, chunkDurationSeconds);
       if (!chunks.length) {
-        setError('No transcript segments available for restyling');
+        setError('No sentences available for restyling');
         return;
       }
 
@@ -3313,7 +3629,7 @@ Context (next fragments):
 
       const asciiOnly = elements.asciiOnly.checked;
       const blocklist = elements.blocklist.value;
-      const totalSegments = transcriptData.length;
+      const totalSentences = sentenceData.length;
       const started = Date.now();
 
       setStatus(
@@ -3321,7 +3637,6 @@ Context (next fragments):
       );
 
       let processedSegments = 0;
-      let lastChunkIndex = -1;
 
       try {
         for (let i = 0; i < chunks.length; i += 1) {
@@ -3330,7 +3645,6 @@ Context (next fragments):
           }
 
           const chunk = chunks[i];
-          lastChunkIndex = i;
           const chunkStartLabel = formatTime(Math.max(0, chunk.startTime || 0));
           const chunkEndLabel = formatTime(Math.max(0, chunk.endTime || 0));
           setStatus(`Restyling chunk ${i + 1}/${chunks.length} (${chunkStartLabel} - ${chunkEndLabel})`);
@@ -3365,7 +3679,7 @@ Context (next fragments):
             outSegments.forEach((seg, idx) => {
               const text = String(seg.text || '');
               const sanitized = asciiOnly ? sanitizeAscii(text, blocklist) : text;
-              transcriptData[chunk.indexes[idx]].restyled = sanitized;
+              sentenceData[chunk.indexes[idx]].restyled = sanitized;
             });
           } else {
             const key = s => `${Number(s.start) || 0}-${Number(s.end) || 0}`;
@@ -3374,29 +3688,28 @@ Context (next fragments):
               const mapped = map.get(key(seg));
               if (typeof mapped === 'string') {
                 const sanitized = asciiOnly ? sanitizeAscii(mapped, blocklist) : mapped;
-                transcriptData[chunk.indexes[idx]].restyled = sanitized;
+                sentenceData[chunk.indexes[idx]].restyled = sanitized;
               }
             });
           }
 
           processedSegments += chunk.indexes.length;
-          elements.progress.textContent = `Chunks ${i + 1}/${chunks.length} | Segments ${processedSegments}/${totalSegments}`;
+          elements.progress.textContent = `Chunks ${i + 1}/${chunks.length} | Segments ${processedSegments}/${totalSentences}`;
           renderList();
           if (activeSegmentIndex >= 0) {
-            updateSubtitleText(transcriptData[activeSegmentIndex]);
+            updateSubtitleText(sentenceData[activeSegmentIndex]);
           }
         }
 
         if (aborter.signal.aborted) {
-          setStatus(`Restyle stopped: ${processedSegments}/${totalSegments} segments updated`);
+          setStatus(`Restyle stopped: ${processedSegments}/${totalSentences} segments updated`);
         } else {
           const duration = dur(started);
-          setStatus(`Restyle complete: ${processedSegments}/${totalSegments} segments in ${duration}`);
+          setStatus(`Restyle complete: ${processedSegments}/${totalSentences} segments in ${duration}`);
         }
       } catch (error) {
-        const chunkInfo = lastChunkIndex >= 0 ? ` on chunk ${lastChunkIndex + 1}` : '';
         logError('Single-call restyle failed:', error);
-        setError(`Restyle failed${chunkInfo}: ${error.message}`);
+        setError(`Restyle failed: ${error.message}`);
       } finally {
         elements.restyleBtn.disabled = false;
         elements.stopBtn.disabled = true;
@@ -3410,7 +3723,7 @@ Context (next fragments):
 
     const concurrencyValue = parseInt(elements.concurrency.value, 10) || 3;
     const concurrency = Math.min(Math.max(concurrencyValue, 1), 10);
-    const total = transcriptData.length;
+    const total = sentenceData.length;
     let completed = 0;
     let errors = 0;
     const retryCounts = new Array(total).fill(0);
@@ -3425,9 +3738,9 @@ Context (next fragments):
     const GLOBAL_COOLDOWN_THRESHOLD = 3;
     const GLOBAL_COOLDOWN_MS = 8000;
 
-    transcriptData.forEach(segment => {
-      delete segment.restyled;
-      delete segment.error;
+    sentenceData.forEach(sentence => {
+      delete sentence.restyled;
+      delete sentence.error;
     });
 
     aborter = new AbortController();
@@ -3466,8 +3779,8 @@ Context (next fragments):
           break;
         }
 
-        const segment = transcriptData[index];
-        const prompt = buildPrompt(segment, index, transcriptData);
+        const sentence = sentenceData[index];
+        const prompt = buildPrompt(sentence, index, sentenceData);
         const requestId = `${activeBatchId}:${index}:${retryCounts[index]}`;
 
         try {
@@ -3506,11 +3819,11 @@ Context (next fragments):
             restyled = sanitizeAscii(restyled, elements.blocklist.value);
           }
 
-          segment.restyled = restyled;
+          sentence.restyled = restyled;
           if (index === activeSegmentIndex) {
-            updateSubtitleText(segment);
+            updateSubtitleText(sentence);
           }
-          delete segment.error;
+          delete sentence.error;
 
           completed += 1;
           retryCounts[index] = 0;
@@ -3561,7 +3874,7 @@ Context (next fragments):
           }
 
           logError(`Failed to restyle segment ${index}:`, error);
-          segment.error = message;
+          sentence.error = message;
           errors += 1;
           updateProgress();
         }
@@ -3840,11 +4153,11 @@ Context (next fragments):
   }
 
   function gatherTranscriptText() {
-    if (!transcriptData.length) return '';
+    if (!sentenceData.length) return '';
 
-    let text = transcriptData
-      .map(segment => {
-        return segment.restyled || segment.text;
+    let text = sentenceData
+      .map(sentence => {
+        return sentence.restyled || sentence.text;
       })
       .join(' ');
 
@@ -4088,15 +4401,15 @@ Context (next fragments):
   }
 
   function exportTXT() {
-    if (!transcriptData.length) {
+    if (!sentenceData.length) {
       setError('No transcript data to export');
       return;
     }
 
-    const content = transcriptData
-      .map(segment => {
-        const text = segment.restyled || segment.text;
-        return segment.start ? `[${formatTime(segment.start)}] ${text}` : text;
+    const content = sentenceData
+      .map(sentence => {
+        const text = sentence.restyled || sentence.text;
+        return sentence.start ? `[${formatTime(sentence.start)}] ${text}` : text;
       })
       .join('\n');
 
@@ -4105,16 +4418,16 @@ Context (next fragments):
   }
 
   function exportSRT() {
-    if (!transcriptData.length) {
+    if (!sentenceData.length) {
       setError('No transcript data to export');
       return;
     }
 
-    const content = transcriptData
-      .map((segment, i) => {
-        const text = segment.restyled || segment.text;
-        const start = formatSRTTime(segment.start || i * 3);
-        const end = formatSRTTime(segment.end || i * 3 + 3);
+    const content = sentenceData
+      .map((sentence, i) => {
+        const text = sentence.restyled || sentence.text;
+        const start = formatSRTTime(sentence.start || i * 3);
+        const end = formatSRTTime(sentence.end || i * 3 + 3);
 
         return `${i + 1}\n${start} --> ${end}\n${text}\n`;
       })
@@ -4125,7 +4438,7 @@ Context (next fragments):
   }
 
   function exportVTT() {
-    if (!transcriptData.length) {
+    if (!sentenceData.length) {
       setError('No transcript data to export');
       return;
     }
@@ -4136,15 +4449,15 @@ Context (next fragments):
 
     let content = 'WEBVTT\n\n';
 
-    transcriptData.forEach((segment, index) => {
-      const text = segment.restyled || segment.text || '';
-      const next = transcriptData[index + 1];
+    sentenceData.forEach((sentence, index) => {
+      const text = sentence.restyled || sentence.text || '';
+      const next = sentenceData[index + 1];
 
-      const startSeconds = typeof segment.start === 'number' ? segment.start : lastEnd;
+      const startSeconds = typeof sentence.start === 'number' ? sentence.start : lastEnd;
 
       let endSeconds;
-      if (typeof segment.end === 'number') {
-        endSeconds = segment.end;
+      if (typeof sentence.end === 'number') {
+        endSeconds = sentence.end;
       } else if (next && typeof next.start === 'number') {
         endSeconds = Math.max(next.start - MIN_GAP, startSeconds + MIN_GAP);
       } else {
@@ -4168,7 +4481,7 @@ ${text}
   }
 
   function exportJSON() {
-    if (!transcriptData.length) {
+    if (!sentenceData.length) {
       setError('No transcript data to export');
       return;
     }
@@ -4177,13 +4490,13 @@ ${text}
       metadata: {
         videoId: elements.videoId.value,
         exportDate: new Date().toISOString(),
-        totalSegments: transcriptData.length
+        totalSegments: sentenceData.length
       },
-      segments: transcriptData.map(segment => ({
-        start: segment.start,
-        end: segment.end,
-        text: segment.text,
-        restyled: segment.restyled || null
+      segments: sentenceData.map(sentence => ({
+        start: sentence.start,
+        end: sentence.end,
+        text: sentence.text,
+        restyled: sentence.restyled || null
       }))
     };
 
@@ -4348,8 +4661,11 @@ ${text}
     elements.furigana.addEventListener('change', () => {
       savePrefs();
       // Re-render transcript with furigana
-      if (transcriptData && transcriptData.length > 0) {
-        renderList(transcriptData, elements.searchInput?.value || '');
+      if (sentenceData && sentenceData.length > 0) {
+        renderList(sentenceData, elements.searchInput?.value || '');
+        if (activeSegmentIndex >= 0 && activeSegmentIndex < sentenceData.length) {
+          updateSubtitleText(sentenceData[activeSegmentIndex]);
+        }
       }
       setStatus(`Furigana ${elements.furigana.checked ? 'enabled' : 'disabled'}`);
     });
@@ -4358,8 +4674,11 @@ ${text}
   if (elements.showBoth) {
     elements.showBoth.addEventListener('change', () => {
       savePrefs();
-      if (transcriptData && transcriptData.length > 0) {
-        renderList(transcriptData, elements.searchInput?.value || '');
+      if (sentenceData && sentenceData.length > 0) {
+        renderList(sentenceData, elements.searchInput?.value || '');
+        if (activeSegmentIndex >= 0 && activeSegmentIndex < sentenceData.length) {
+          updateSubtitleText(sentenceData[activeSegmentIndex]);
+        }
       }
       setStatus(`Show both texts ${elements.showBoth.checked ? 'enabled' : 'disabled'}`);
     });
@@ -4438,11 +4757,11 @@ ${text}
       if (!item) return;
       const index = Number(item.dataset.index);
       if (!Number.isFinite(index)) return;
-      const segment = transcriptData[index];
-      if (!segment) return;
-      seekTo(segment.start || 0);
+      const sentence = sentenceData[index];
+      if (!sentence) return;
+      seekTo(sentence.start || 0);
       activeSegmentIndex = index;
-      updateSubtitleText(segment);
+      updateSubtitleText(sentence);
       applyActiveHighlight(true);
     });
   }
@@ -4482,14 +4801,40 @@ ${text}
     elements.rateValue.textContent = elements.ttsRate.value;
   });
 
+  elements.chunkDuration.addEventListener('input', () => {
+    const minutes = parseInt(elements.chunkDuration.value, 10) || 10;
+    elements.chunkDurationValue.textContent = `${minutes} min`;
+    savePrefs();
+  });
+
   elements.exportTxtBtn.addEventListener('click', exportTXT);
   elements.exportSrtBtn.addEventListener('click', exportSRT);
   elements.exportVttBtn.addEventListener('click', exportVTT);
   elements.exportJsonBtn.addEventListener('click', exportJSON);
 
   elements.searchInput.addEventListener('input', () => {
-    renderList(transcriptData, elements.searchInput.value);
+    renderList(sentenceData, elements.searchInput.value);
   });
+
+  chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (message && message.action === 'SET_EXTENSION_ENABLED') {
+      applyExtensionEnabledState(message.enabled);
+      if (typeof sendResponse === 'function') {
+        sendResponse({ success: true });
+      }
+      return false;
+    }
+    return undefined;
+  });
+
+  if (chrome.storage && chrome.storage.onChanged) {
+    chrome.storage.onChanged.addListener((changes, area) => {
+      if (area !== 'local') return;
+      if (Object.prototype.hasOwnProperty.call(changes, 'ytro_extension_enabled')) {
+        applyExtensionEnabledState(Boolean(changes.ytro_extension_enabled.newValue));
+      }
+    });
+  }
 
   // Auto-save preferences on input changes
   [
@@ -4605,6 +4950,9 @@ ${text}
   // Navigation watcher to reset state and cleanup resources
   let lastUrl = location.href;
   function checkNavigation() {
+    if (!extensionEnabled) {
+      return;
+    }
     if (location.href !== lastUrl) {
       lastUrl = location.href;
 
@@ -4650,8 +4998,6 @@ ${text}
 
   setInterval(checkNavigation, 1000);
 
-  ensureVideoListeners();
-
   // Load browser voices when available
   if (window.speechSynthesis) {
     speechSynthesis.addEventListener('voiceschanged', listBrowserVoices);
@@ -4662,7 +5008,11 @@ ${text}
   // Initialize
   loadPrefs()
     .then(() => {
-      detectVideoId();
+      if (!extensionEnabled) {
+        log('Transcript Styler initialized in disabled state');
+        return;
+      }
+
       if (overlayDockPreferred) {
         attemptParkOverlay();
       }
