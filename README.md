@@ -15,7 +15,7 @@ See INSTALL.md for screenshots, provider setup tips, and fallback guidance.
 ## What You Can Do
 - Capture caption tracks through the bundled helper to dodge YouTube quota hiccups.
 - Restyle transcripts with OpenAI, Anthropic, or any OpenAI-compatible endpoint using presets or custom prompts.
-- Narrate with OpenAI, Azure Speech, Kokoro, or on-device browser voices, including auto-playback synced to video.
+- Narrate with OpenAI, Azure Speech, Kokoro, or on-device browser voices, including auto-playback synced to video and a configurable rate multiplier (Kokoro defaults to http://localhost:8880/v1/audio/speech with voice af_sky+af+af_nicole).
 - Ask the transcript questions and receive styled answers you can play back with the same TTS stack.
 - Export synchronized transcripts to TXT, SRT, VTT, or JSON while keeping the original wording.
 - Overlay original and restyled subtitles directly on the player with furigana support and draggable or dockable controls.
@@ -26,7 +26,7 @@ The helper exposes /api/ping, /api/tracks, and /api/transcript on http://127.0.0
 ## Product Walkthrough
 - Overlay header — use Detect + List to capture the active video, populate caption choices, and then fetch transcripts. Toggle debug logging or park the UI inside the native transcript panel.
 - Transcript workspace — search, click-to-seek, and review original or restyled sentences with persistent preferences.
-- Restyle and TTS panels — configure prompt presets, batching, and provider keys; queue auto-TTS for the currently selected sentence.
+- Restyle and TTS panels — configure prompt presets, batching, and provider keys; Kokoro FastAPI defaults are pre-filled, and you can queue auto-TTS with a two-decimal rate multiplier for the currently selected sentence.
 - Transcript Q&A — type a question about the loaded captions, reuse your styling preferences, and optionally trigger read-aloud on the generated answer.
 - Exports — download transcript bundles on demand. Each export reflects the latest restyling state.
 

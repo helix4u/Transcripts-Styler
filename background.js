@@ -252,6 +252,8 @@ function abortBatch(batchId) {
 }
 
 const DEFAULT_ANTHROPIC_VERSION = '2023-06-01';
+const DEFAULT_KOKORO_TTS_URL = 'http://localhost:8880/v1/audio/speech';
+const DEFAULT_KOKORO_VOICE = 'af_sky+af+af_nicole';
 
 function handleAbortRequests(data, sendResponse) {
   const payload = data || {};
@@ -654,7 +656,8 @@ async function handleTTSSpeak(data, sendResponse) {
     azureRegion,
     format = 'mp3',
     requestId,
-    batchId
+    batchId,
+    rate = 1
   } = data;
   const controller = registerAbortController(batchId, requestId);
 
@@ -679,7 +682,7 @@ async function handleTTSSpeak(data, sendResponse) {
       break;
 
     case 'kokoro':
-      result = await ttsKokoro(baseUrl, text, voice, controller.signal);
+      result = await ttsKokoro(baseUrl, text, voice, format, rate, controller.signal);
       break;
 
     case 'azure':
@@ -804,18 +807,26 @@ async function ttsOpenAICompatible(
 
 // Kokoro FastAPI TTS
 
-async function ttsKokoro(baseUrl, text, voice, signal) {
-  const url = `${slashTrim(baseUrl)}/tts`;
+async function ttsKokoro(baseUrl, text, voice, format = 'mp3', rate = 1, signal) {
+  const trimmedBase = (baseUrl || '').trim();
+  const resolvedUrl =
+    !trimmedBase || /openai\.com/i.test(trimmedBase)
+      ? DEFAULT_KOKORO_TTS_URL
+      : trimmedBase;
+  const responseFormat = (format || 'mp3').toLowerCase();
+  const normalizedRate = Math.round(Math.max(0.5, Math.min(2, Number(rate) || 1)) * 100) / 100;
 
-  const response = await fetchWithCreds(url, {
+  const response = await fetchWithCreds(resolvedUrl, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json'
     },
     body: JSON.stringify({
-      text,
-      voice: voice || 'default',
-      lang: 'en'
+      model: 'kokoro',
+      input: text,
+      voice: voice?.trim() || DEFAULT_KOKORO_VOICE,
+      response_format: responseFormat,
+      speed: normalizedRate
     }),
     signal
   });

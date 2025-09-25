@@ -47,6 +47,10 @@ Keep this process running any time you fetch transcripts.
 - Open the Restyle or TTS panels to select a provider and paste the relevant API key. Keys live in memory only.
 - Adjust concurrency for LLM calls; start with 1 while testing new providers.
 - Use the presets menu to store and reuse prompt settings across sessions.
+- Kokoro FastAPI users: the extension targets `http://localhost:8880/v1/audio/speech` by default and will fall back to the bundled voice combo `af_sky+af+af_nicole` if no voice is provided.
+
+### Rate Multiplier
+- The TTS section includes a rate multiplier input (0.50–2.00, two decimal precision). It applies to browser voices and is forwarded to Kokoro's `speed` parameter.
 
 ## Transcript Q&A Quick Use
 - Keep a transcript loaded (via Fetch or auto-load) and scroll to the Transcript Q&A panel.

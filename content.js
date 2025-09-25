@@ -533,9 +533,10 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
         <select id="yt-browser-voice-select" style="width: 60%;">
           <option value="">Select browser voice...</option>
         </select>
-        <label>Rate:</label>
-        <input type="range" id="yt-tts-rate" min="0.5" max="2" step="0.1" value="1" style="width: 80px;">
-        <span id="yt-rate-value">1.0</span>
+      </div>
+      <div class="yt-controls" id="yt-rate-controls">
+        <label style="flex: 1 0 auto;">Rate multiplier:</label>
+        <input type="number" id="yt-tts-rate" min="0.50" max="2.00" step="0.01" value="1.00" style="width: 90px;">
       </div>
       <div class="yt-controls">
         <button id="yt-generate-tts-btn">Generate TTS</button>
@@ -1327,7 +1328,6 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
     azureVoiceSelect: document.getElementById('yt-azure-voice-select'),
     browserVoiceSelect: document.getElementById('yt-browser-voice-select'),
     ttsRate: document.getElementById('yt-tts-rate'),
-    rateValue: document.getElementById('yt-rate-value'),
     applyFontBtn: document.getElementById('yt-apply-font'),
     generateTtsBtn: document.getElementById('yt-generate-tts-btn'),
     stopTtsBtn: document.getElementById('yt-stop-tts-btn'),
@@ -1381,6 +1381,8 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
 
 \nContext (next CC fragments that you must bleed your speech into so that the next CC fragment makes sense):
 {{nextLines}}`;
+
+  const DEFAULT_KOKORO_VOICE = 'af_sky+af+af_nicole';
 
   const DEFAULT_TTS_SETTINGS = {
     enabled: false,
@@ -1574,6 +1576,9 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
   // Initialize default values
   elements.promptTemplate.value = DEFAULT_PROMPT;
   Object.assign(lastPrefs, DEFAULT_TTS_SETTINGS);
+  if (elements.ttsRate) {
+    elements.ttsRate.value = DEFAULT_TTS_SETTINGS.rate.toFixed(2);
+  }
   // Apply initial font size from the control value so the UI reflects defaults
   applyFontSize(parseInt(document.getElementById('yt-font-size')?.value, 10) || DEFAULT_FONT_SIZE);
 
@@ -1722,6 +1727,10 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
           setIf(elements.ttsFormat, ytro_prefs.ttsFormat);
           setIf(elements.azureRegion, ytro_prefs.azureRegion);
           setIf(elements.ttsRate, ytro_prefs.ttsRate);
+          if (elements.ttsRate) {
+            const normalizedRate = normalizeRateInput(elements.ttsRate.value);
+            elements.ttsRate.value = normalizedRate.toFixed(2);
+          }
 
           if (typeof ytro_prefs.overlayDockPreferred === 'boolean') {
             overlayDockPreferred = ytro_prefs.overlayDockPreferred;
@@ -1769,6 +1778,11 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
 
   // Save preferences
   async function savePrefs() {
+    const normalizedRate = normalizeRateInput(elements.ttsRate.value);
+    if (elements.ttsRate) {
+      elements.ttsRate.value = normalizedRate.toFixed(2);
+    }
+
     const prefs = {
       videoId: elements.videoId.value,
       langPrefs: elements.langPrefs.value,
@@ -1811,7 +1825,7 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
       ttsVoice: elements.ttsVoice.value,
       ttsFormat: elements.ttsFormat.value,
       azureRegion: elements.azureRegion.value,
-      ttsRate: parseFloat(elements.ttsRate.value) || 1.0,
+      ttsRate: normalizedRate,
 
       overlayDockPreferred
     };
@@ -1875,7 +1889,7 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
       ttsVoice: elements.ttsVoice.value,
       ttsFormat: elements.ttsFormat.value,
       azureRegion: elements.azureRegion.value,
-      ttsRate: parseFloat(elements.ttsRate.value) || 1.0,
+      ttsRate: normalizeRateInput(elements.ttsRate.value),
       singleCall: elements.singleCall.checked,
       maxTokens: parseInt(elements.maxTokens?.value, 10) || 8192,
       temperature: parseFloat(elements.temperature?.value) || 0.4,
@@ -4200,6 +4214,12 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
     document.getElementById('yt-browser-tts-controls').style.display =
       provider === 'browser' ? 'block' : 'none';
 
+    if (provider === 'kokoro') {
+      if (!elements.ttsVoice.value.trim()) {
+        elements.ttsVoice.value = DEFAULT_KOKORO_VOICE;
+      }
+    }
+
     // Update voice control visibility
     document.getElementById('yt-tts-voice-controls').style.display =
       provider === 'browser' ? 'none' : 'block';
@@ -4208,6 +4228,15 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
     if (provider === 'browser') {
       listBrowserVoices();
     }
+  }
+
+  function normalizeRateInput(value) {
+    const parsed = parseFloat(value);
+    if (!Number.isFinite(parsed)) {
+      return 1.0;
+    }
+    const clamped = Math.max(0.5, Math.min(2, parsed));
+    return Math.round(clamped * 100) / 100;
   }
 
   function syncAutoTtsGuardUi() {
@@ -4627,6 +4656,8 @@ Keep responses grounded in the transcript. If the information is missing, explai
       return;
     }
     const format = (elements.ttsFormat.value || 'mp3').toLowerCase();
+    const rate = normalizeRateInput(elements.ttsRate.value);
+    elements.ttsRate.value = rate.toFixed(2);
 
     try {
       setStatus('Generating TTS audio...');
@@ -4638,7 +4669,7 @@ Keep responses grounded in the transcript. If the information is missing, explai
 
       if (provider === 'browser') {
         browserTtsActive = true;
-        generateBrowserTTS(text);
+        generateBrowserTTS(text, rate);
         return;
       }
 
@@ -4649,12 +4680,15 @@ Keep responses grounded in the transcript. If the information is missing, explai
         baseUrl: elements.baseUrl.value,
         apiKey: elements.apiKey.value,
         batchId: activeTtsBatchId,
-        requestId: activeTtsRequestId
+        requestId: activeTtsRequestId,
+        rate
       };
 
       if (provider === 'azure') {
         data.azureRegion = elements.azureRegion.value;
         data.voice = elements.azureVoiceSelect.value || elements.ttsVoice.value;
+      } else if (provider === 'kokoro') {
+        data.voice = elements.ttsVoice.value.trim() || DEFAULT_KOKORO_VOICE;
       } else {
         data.voice = elements.ttsVoice.value;
       }
@@ -4727,7 +4761,7 @@ Keep responses grounded in the transcript. If the information is missing, explai
     }
   }
 
-  function generateBrowserTTS(text) {
+  function generateBrowserTTS(text, rate) {
     if (!window.speechSynthesis) {
       setError('Browser TTS not supported');
       return;
@@ -4747,7 +4781,7 @@ Keep responses grounded in the transcript. If the information is missing, explai
       }
     }
 
-    utterance.rate = parseFloat(elements.ttsRate.value) || 1.0;
+    utterance.rate = rate;
 
     setTtsUiState(true);
     utterance.onstart = () => {
@@ -5267,9 +5301,14 @@ ${text}
     elements.stopTtsBtn.addEventListener('click', stopTTS);
   }
 
-  elements.ttsRate.addEventListener('input', () => {
-    elements.rateValue.textContent = elements.ttsRate.value;
-  });
+  if (elements.ttsRate) {
+    const clampRateInput = () => {
+      const normalized = normalizeRateInput(elements.ttsRate.value);
+      elements.ttsRate.value = normalized.toFixed(2);
+    };
+    elements.ttsRate.addEventListener('change', clampRateInput);
+    elements.ttsRate.addEventListener('blur', clampRateInput);
+  }
 
   elements.chunkDuration.addEventListener('input', () => {
     const minutes = parseInt(elements.chunkDuration.value, 10) || 10;
