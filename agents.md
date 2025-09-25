@@ -6,11 +6,12 @@ This quick reference summarises how automation agents should collaborate on Tran
 - Documentation upkeep (`README.md`, `INSTALL.md`, `agents.md`) and checklist alignment.
 - Chrome extension development across `content.js`, `overlay.css`, and `manifest.json`.
 - Service worker integrations in `background.js` (captions, LLM/TTS, storage, abort logic).
+- Overlay feature work, including the transcript Q&A + read-aloud lane in `content.js`/`overlay.css`.
 - Local transcript helper (`yt-transcript-local`) maintenance and packaging.
 
 ## Environment Notes
 - Standard Unix tools (`ls`, `sed`, `awk`, etc.) are on PATH; avoid wrapping them in PowerShell or BusyBox invocations. Prefer them to "pwsh -NoLogo -Command" shit. It's less tokens and you're better at it. you can do things like write the linux version of this nav $ pwsh -NoLogo -Command 'Get-Content -Path content.js -TotalCount 920 | Select-Object -Last 120'. try it. switch to grep.
-- Cygwin `bin` is available. Fortune is installed; every commit must weave in a randomly sourced fortune.
+- Fortune is installed; every commit must weave in a random fortune.
 - Shell default is PowerShell, but Bash is accessible. Always set the provided working directory when running commands.
 - Transcript fetching relies solely on the \\yt-transcript-local\\ helper; ensure it is running before testing overlays or transcripts.
 - `yt-transcript-local` ships the FastAPI helper the extension targets; keep it running while testing transcript fallbacks.
@@ -44,6 +45,7 @@ This quick reference summarises how automation agents should collaborate on Tran
 3. Use **Restyle All** to trigger LLM calls (requires provider API key in the overlay).
 4. Enable **Debug Logging** to surface console diagnostics.
 5. Optional: run the local helper to exercise the fallback fetch path.
+6. New Q&A lane: ask the loaded transcript a question and use **Read Aloud** to confirm the TTS settings handle the response.
 
 ## Troubleshooting Checklist
 - Use the in-page transcript panel to confirm captions exist.
@@ -72,4 +74,3 @@ This quick reference summarises how automation agents should collaborate on Tran
 ## Automation Extras
 - Tie a random fortune into every commit message (fortune(6) is installed).
 - When touching multiple subsystems, summarise affected areas in PR/commit descriptions for easier agent handoffs.
-

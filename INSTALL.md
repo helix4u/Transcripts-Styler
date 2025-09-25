@@ -41,11 +41,18 @@ Keep this process running any time you fetch transcripts.
 3. Choose a caption track from the dropdown.
 4. Press Fetch to populate the overlay and subtitle panel.
 5. Toggle Show both original and styled text if you want dual subtitles over the video.
+6. Optional: Open the Transcript Q&A section to ask questions once the transcript loads.
 
 ## Provider Configuration
 - Open the Restyle or TTS panels to select a provider and paste the relevant API key. Keys live in memory only.
 - Adjust concurrency for LLM calls; start with 1 while testing new providers.
 - Use the presets menu to store and reuse prompt settings across sessions.
+
+## Transcript Q&A Quick Use
+- Keep a transcript loaded (via Fetch or auto-load) and scroll to the Transcript Q&A panel.
+- Enter a question about the current captions, then click Ask (or press Ctrl/Cmd+Enter).
+- Responses inherit your style and output-language preferences; the Read Aloud button reuses your TTS provider settings.
+- Answers appear inline; if the helper or providers are offline you will see an error message instead.
 
 ## Troubleshooting Cheatsheet
 - No tracks found — refresh the YouTube tab so the content script re-parses player JSON.

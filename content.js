@@ -28,6 +28,9 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
     resumeTimeoutId: null
   };
 
+  let qaAnswerText = '';
+  let qaRequestInFlight = false;
+
   let overlayParked = false;
   let overlayDockRetryHandle = null;
   let overlayDockHost = null;
@@ -479,6 +482,21 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
         <button id="yt-stop-btn">Stop</button>
         <span id="yt-progress"></span>
       </div>
+      </div>
+    </div>
+
+    <!-- Transcript Q&A Section -->
+    <div class="yt-section collapsible" data-section="qa">
+      <h4 class="section-header">Transcript Q&amp;A <span class="collapse-icon">▼</span></h4>
+      <div class="section-content">
+      <div class="yt-controls">
+        <textarea id="yt-qa-question" rows="3" style="width: 100%;" placeholder="Ask a question about the transcript..."></textarea>
+      </div>
+      <div class="yt-controls">
+        <button id="yt-qa-ask-btn" type="button">Ask</button>
+        <button id="yt-qa-read-btn" type="button" disabled>Read Aloud</button>
+      </div>
+      <div id="yt-qa-response" class="yt-qa-response" data-placeholder="Styled answers will appear here." aria-live="polite"></div>
       </div>
     </div>
 
@@ -949,6 +967,276 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
     }
   }
 
+  function chooseBrowserVoice(cleanText, prefs) {
+    if (!window.speechSynthesis) {
+      return null;
+    }
+
+    const voices = window.speechSynthesis.getVoices();
+    if (!voices || !voices.length) {
+      return null;
+    }
+
+    const requested = (prefs.ttsVoice || '').trim();
+    let selectedVoice = null;
+
+    if (requested) {
+      selectedVoice = voices.find(v => v.name === requested || v.voiceURI === requested);
+
+      if (!selectedVoice) {
+        const languageCode = requested.toLowerCase();
+        selectedVoice = voices.find(
+          v =>
+            v.lang.toLowerCase().includes(languageCode) ||
+            v.name.toLowerCase().includes(languageCode)
+        );
+      }
+    }
+
+    if (!selectedVoice) {
+      if (/[\u3040-\u309f\u30a0-\u30ff\u4e00-\u9faf]/.test(cleanText)) {
+        selectedVoice = voices.find(
+          v => v.lang.toLowerCase().includes('ja') || v.lang.toLowerCase().includes('japanese')
+        );
+        if (selectedVoice) {
+          log(`Auto-selected Japanese voice: ${selectedVoice.name}`);
+        }
+      } else if (/[\u4e00-\u9fff]/.test(cleanText)) {
+        selectedVoice = voices.find(
+          v => v.lang.toLowerCase().includes('zh') || v.lang.toLowerCase().includes('chinese')
+        );
+        if (selectedVoice) {
+          log(`Auto-selected Chinese voice: ${selectedVoice.name}`);
+        }
+      } else if (/[\uac00-\ud7af\u1100-\u11ff\u3130-\u318f]/.test(cleanText)) {
+        selectedVoice = voices.find(
+          v => v.lang.toLowerCase().includes('ko') || v.lang.toLowerCase().includes('korean')
+        );
+        if (selectedVoice) {
+          log(`Auto-selected Korean voice: ${selectedVoice.name}`);
+        }
+      } else if (/[\u0600-\u06ff]/.test(cleanText)) {
+        selectedVoice = voices.find(
+          v => v.lang.toLowerCase().includes('ar') || v.lang.toLowerCase().includes('arabic')
+        );
+        if (selectedVoice) {
+          log(`Auto-selected Arabic voice: ${selectedVoice.name}`);
+        }
+      } else if (/[\u0400-\u04ff]/.test(cleanText)) {
+        selectedVoice = voices.find(
+          v => v.lang.toLowerCase().includes('ru') || v.lang.toLowerCase().includes('russian')
+        );
+        if (selectedVoice) {
+          log(`Auto-selected Russian voice: ${selectedVoice.name}`);
+        }
+      }
+    }
+
+    return selectedVoice || null;
+  }
+
+  async function queueBrowserSpeech(text, prefs, { statusLabel = 'Playing audio' } = {}) {
+    if (!('speechSynthesis' in window)) {
+      setError('Browser TTS not supported in this environment');
+      return;
+    }
+
+    const cleanText = text.trim();
+    if (!cleanText) {
+      setStatus('No text to speak');
+      return;
+    }
+
+    log(
+      `Browser TTS: Speaking text (${cleanText.length} chars): "${cleanText.substring(0, 50)}${
+        cleanText.length > 50 ? '...' : ''
+      }"`
+    );
+
+    if (browserTtsActive || window.speechSynthesis.speaking) {
+      log('Browser TTS already speaking; queuing next utterance');
+    }
+
+    return new Promise(resolve => {
+      const finish = () => {
+        browserTtsActive = false;
+        updateStopButtonVisibility();
+        resolve();
+      };
+
+      const utterance = new SpeechSynthesisUtterance(cleanText);
+      const selectedVoice = chooseBrowserVoice(cleanText, prefs);
+
+      if (selectedVoice) {
+        utterance.voice = selectedVoice;
+        utterance.lang = selectedVoice.lang;
+        log(`Using voice: ${selectedVoice.name} (${selectedVoice.lang})`);
+      } else {
+        log('No specific voice found, using default');
+      }
+
+      utterance.rate = prefs.ttsRate || 1.0;
+      utterance.pitch = 1.0;
+      utterance.volume = 1.0;
+
+      utterance.onstart = () => {
+        browserTtsActive = true;
+        setStatus(`${statusLabel} (browser TTS)`);
+        updateStopButtonVisibility();
+      };
+
+      utterance.onend = () => {
+        log('Browser TTS completed');
+        finish();
+      };
+
+      utterance.onerror = event => {
+        logError('Browser TTS error:', event.error);
+        setError(`TTS error: ${event.error}`);
+        finish();
+      };
+
+      try {
+        window.speechSynthesis.speak(utterance);
+      } catch (error) {
+        logError('Failed to queue browser TTS:', error);
+        setError('Failed to start browser TTS');
+        finish();
+      }
+    });
+  }
+
+  async function playAudioFromBase64(audioData, mimeType, statusLabel = 'Playing audio') {
+    const currentAudio = elements.ttsAudio;
+    if (!currentAudio) {
+      setError('No audio element available for TTS playback');
+      return;
+    }
+
+    const binaryString = atob(audioData);
+    const bytes = new Uint8Array(binaryString.length);
+    for (let i = 0; i < binaryString.length; i += 1) {
+      bytes[i] = binaryString.charCodeAt(i);
+    }
+
+    const blob = new Blob([bytes], { type: mimeType || 'audio/mpeg' });
+    const audioUrl = URL.createObjectURL(blob);
+
+    currentAudio.src = audioUrl;
+    currentAudio.style.display = 'block';
+    setStatus(statusLabel);
+
+    await new Promise(resolve => {
+      let resolved = false;
+
+      const cleanup = () => {
+        if (resolved) return;
+        resolved = true;
+        currentAudio.removeEventListener('ended', onEnded);
+        currentAudio.removeEventListener('error', onError);
+        currentAudio.removeEventListener('pause', onPause);
+        URL.revokeObjectURL(audioUrl);
+        updateStopButtonVisibility();
+        resolve();
+      };
+
+      const onEnded = () => {
+        cleanup();
+      };
+
+      const onError = event => {
+        logError('Failed to play TTS audio:', event?.error || event);
+        setStatus('Failed to play audio');
+        cleanup();
+      };
+
+      const onPause = () => {
+        if (!currentAudio.paused) {
+          return;
+        }
+        if (currentAudio.ended || currentAudio.currentTime === 0 || !currentAudio.src) {
+          cleanup();
+        }
+      };
+
+      currentAudio.addEventListener('ended', onEnded, { once: true });
+      currentAudio.addEventListener('error', onError, { once: true });
+      currentAudio.addEventListener('pause', onPause, { once: true });
+
+      const playPromise = currentAudio.play();
+      if (playPromise && typeof playPromise.catch === 'function') {
+        playPromise.catch(onError);
+      }
+    });
+  }
+
+  async function speakTextWithPrefs(text, { statusLabel, errorMessage } = {}) {
+    const cleanText = (text || '').trim();
+    if (!cleanText) {
+      setStatus('No text content to speak');
+      return false;
+    }
+
+    const currentAudio = elements.ttsAudio;
+    if (currentAudio) {
+      try {
+        currentAudio.pause();
+        currentAudio.currentTime = 0;
+      } catch (_) {
+        /* ignore pause errors */
+      }
+    }
+
+    try {
+      const prefs = await getPrefs();
+
+      if (!prefs.ttsEnabled) {
+        setStatus('TTS is not enabled. Enable it in the TTS section first.');
+        return false;
+      }
+
+      if (prefs.asciiOnly && /[^\x00-\x7F]/.test(cleanText)) {
+        setStatus(
+          'Warning: ASCII-only mode is enabled but text contains Unicode characters. TTS may not work properly.'
+        );
+        log('ASCII-only mode warning: Text contains non-ASCII characters:', cleanText);
+      }
+
+      if (prefs.ttsProvider === 'browser') {
+        await queueBrowserSpeech(cleanText, prefs, {
+          statusLabel: statusLabel || 'Playing audio'
+        });
+        return true;
+      }
+
+      const response = await sendMessage('TTS_SPEAK', {
+        text: cleanText,
+        provider: prefs.ttsProvider,
+        voice: prefs.ttsVoice,
+        format: prefs.ttsFormat,
+        azureRegion: prefs.azureRegion,
+        baseUrl: prefs.baseUrl,
+        apiKey: prefs.apiKey,
+        rate: prefs.ttsRate
+      });
+
+      if (!response.success || !response.data?.audioData) {
+        throw new Error(response.error || 'TTS request failed');
+      }
+
+      await playAudioFromBase64(
+        response.data.audioData,
+        response.data.mime || 'audio/mpeg',
+        statusLabel || 'Playing audio'
+      );
+      return true;
+    } catch (error) {
+      logError('TTS request failed:', error);
+      setError(errorMessage || 'Failed to generate TTS audio');
+      return false;
+    }
+  }
+
   async function playSegmentTTS(segmentIndex, textType) {
     if (!sentenceData || segmentIndex < 0 || segmentIndex >= sentenceData.length) {
       return;
@@ -970,242 +1258,10 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
       return;
     }
 
-    // Stop any currently playing TTS
-    const currentAudio = elements.ttsAudio;
-    if (currentAudio) {
-      try {
-        currentAudio.pause();
-        currentAudio.currentTime = 0;
-      } catch (_) {
-        /* ignore pause errors */
-      }
-    }
-
-    try {
-      // Get current TTS settings
-      const prefs = await getPrefs();
-
-      if (!prefs.ttsEnabled) {
-        setStatus('TTS is not enabled. Enable it in the TTS section first.');
-        return;
-      }
-
-      // Check for ASCII-only mode with non-ASCII text
-      if (prefs.asciiOnly && /[^\x00-\x7F]/.test(textToSpeak)) {
-        setStatus(
-          'Warning: ASCII-only mode is enabled but text contains Unicode characters. TTS may not work properly.'
-        );
-        log('ASCII-only mode warning: Text contains non-ASCII characters:', textToSpeak);
-      }
-
-      // Handle browser TTS directly in content script
-      if (prefs.ttsProvider === 'browser') {
-        if (!('speechSynthesis' in window)) {
-          setError('Browser TTS not supported in this environment');
-          return;
-        }
-
-        const cleanText = textToSpeak.trim();
-        if (!cleanText) {
-          setStatus('No text to speak');
-          return;
-        }
-
-        log(
-          `Browser TTS: Speaking text (${cleanText.length} chars): "${cleanText.substring(0, 50)}${
-            cleanText.length > 50 ? '...' : ''
-          }"`
-        );
-
-        if (browserTtsActive || window.speechSynthesis.speaking) {
-          log('Browser TTS already speaking; queuing next utterance');
-        }
-
-        return new Promise(resolve => {
-          const finish = () => {
-            browserTtsActive = false;
-            updateStopButtonVisibility();
-            resolve();
-          };
-
-          const utterance = new SpeechSynthesisUtterance(cleanText);
-
-          const voices = window.speechSynthesis.getVoices();
-          let selectedVoice = null;
-
-          if (prefs.ttsVoice) {
-            selectedVoice = voices.find(
-              v => v.name === prefs.ttsVoice || v.voiceURI === prefs.ttsVoice
-            );
-
-            if (!selectedVoice) {
-              const languageCode = prefs.ttsVoice.toLowerCase();
-              selectedVoice = voices.find(
-                v =>
-                  v.lang.toLowerCase().includes(languageCode) ||
-                  v.name.toLowerCase().includes(languageCode)
-              );
-            }
-          }
-
-          if (!selectedVoice) {
-            if (/[\u3040-\u309f\u30a0-\u30ff\u4e00-\u9faf]/.test(cleanText)) {
-              selectedVoice = voices.find(
-                v =>
-                  v.lang.toLowerCase().includes('ja') || v.lang.toLowerCase().includes('japanese')
-              );
-              if (selectedVoice) {
-                log(`Auto-selected Japanese voice: ${selectedVoice.name}`);
-              }
-            } else if (/[\u4e00-\u9fff]/.test(cleanText)) {
-              selectedVoice = voices.find(
-                v => v.lang.toLowerCase().includes('zh') || v.lang.toLowerCase().includes('chinese')
-              );
-              if (selectedVoice) {
-                log(`Auto-selected Chinese voice: ${selectedVoice.name}`);
-              }
-            } else if (/[\uac00-\ud7af\u1100-\u11ff\u3130-\u318f]/.test(cleanText)) {
-              selectedVoice = voices.find(
-                v => v.lang.toLowerCase().includes('ko') || v.lang.toLowerCase().includes('korean')
-              );
-              if (selectedVoice) {
-                log(`Auto-selected Korean voice: ${selectedVoice.name}`);
-              }
-            } else if (/[\u0600-\u06ff]/.test(cleanText)) {
-              selectedVoice = voices.find(
-                v => v.lang.toLowerCase().includes('ar') || v.lang.toLowerCase().includes('arabic')
-              );
-              if (selectedVoice) {
-                log(`Auto-selected Arabic voice: ${selectedVoice.name}`);
-              }
-            } else if (/[\u0400-\u04ff]/.test(cleanText)) {
-              selectedVoice = voices.find(
-                v => v.lang.toLowerCase().includes('ru') || v.lang.toLowerCase().includes('russian')
-              );
-              if (selectedVoice) {
-                log(`Auto-selected Russian voice: ${selectedVoice.name}`);
-              }
-            }
-          }
-
-          if (selectedVoice) {
-            utterance.voice = selectedVoice;
-            utterance.lang = selectedVoice.lang;
-            log(`Using voice: ${selectedVoice.name} (${selectedVoice.lang})`);
-          } else {
-            log('No specific voice found, using default');
-          }
-
-          utterance.rate = prefs.ttsRate || 1.0;
-          utterance.pitch = 1.0;
-          utterance.volume = 1.0;
-
-          utterance.onstart = () => {
-            browserTtsActive = true;
-            updateStopButtonVisibility();
-          };
-
-          utterance.onend = () => {
-            log('Browser TTS completed');
-            finish();
-          };
-
-          utterance.onerror = event => {
-            logError('Browser TTS error:', event.error);
-            setError(`TTS error: ${event.error}`);
-            finish();
-          };
-
-          try {
-            window.speechSynthesis.speak(utterance);
-            setStatus(`Playing ${textType} text for segment ${segmentIndex + 1} (browser TTS)`);
-          } catch (error) {
-            logError('Failed to queue browser TTS:', error);
-            setError('Failed to start browser TTS');
-            finish();
-          }
-        });
-      }
-      // Send TTS request to background script for other providers
-      const response = await sendMessage('TTS_SPEAK', {
-        text: textToSpeak,
-        provider: prefs.ttsProvider,
-        voice: prefs.ttsVoice,
-        format: prefs.ttsFormat,
-        azureRegion: prefs.azureRegion,
-        baseUrl: prefs.baseUrl,
-        apiKey: prefs.apiKey,
-        rate: prefs.ttsRate
-      });
-
-      if (response.success && response.data && response.data.audioData) {
-        if (!currentAudio) {
-          setError('No audio element available for TTS playback');
-          return;
-        }
-
-        const audioData = response.data.audioData;
-        const mimeType = response.data.mime || 'audio/mpeg';
-        const binaryString = atob(audioData);
-        const bytes = new Uint8Array(binaryString.length);
-        for (let i = 0; i < binaryString.length; i += 1) {
-          bytes[i] = binaryString.charCodeAt(i);
-        }
-        const blob = new Blob([bytes], { type: mimeType });
-        const audioUrl = URL.createObjectURL(blob);
-
-        currentAudio.src = audioUrl;
-        currentAudio.style.display = 'block';
-        setStatus(`Playing ${textType} text for segment ${segmentIndex + 1}`);
-
-        await new Promise(resolve => {
-          let resolved = false;
-
-          const cleanup = () => {
-            if (resolved) return;
-            resolved = true;
-            currentAudio.removeEventListener('ended', onEnded);
-            currentAudio.removeEventListener('error', onError);
-            currentAudio.removeEventListener('pause', onPause);
-            URL.revokeObjectURL(audioUrl);
-            resolve();
-          };
-
-          const onEnded = () => {
-            cleanup();
-          };
-
-          const onError = event => {
-            logError('Failed to play TTS audio:', event?.error || event);
-            setStatus('Failed to play audio');
-            cleanup();
-          };
-
-          const onPause = () => {
-            if (!currentAudio.paused) {
-              return;
-            }
-            if (currentAudio.ended || currentAudio.currentTime === 0 || !currentAudio.src) {
-              cleanup();
-            }
-          };
-
-          currentAudio.addEventListener('ended', onEnded, { once: true });
-          currentAudio.addEventListener('error', onError, { once: true });
-          currentAudio.addEventListener('pause', onPause, { once: true });
-
-          const playPromise = currentAudio.play();
-          if (playPromise && typeof playPromise.catch === 'function') {
-            playPromise.catch(onError);
-          }
-        });
-      } else {
-        setError(`TTS failed: ${response.error || 'Unknown error'}`);
-      }
-    } catch (error) {
-      logError('TTS request failed:', error);
-      setError('Failed to generate TTS audio');
-    }
+    await speakTextWithPrefs(textToSpeak, {
+      statusLabel: `Playing ${textType} text for segment ${segmentIndex + 1}`,
+      errorMessage: 'Failed to generate TTS audio'
+    });
   }
 
   // Element references
@@ -1257,6 +1313,11 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
     stopBtn: document.getElementById('yt-stop-btn'),
     progress: document.getElementById('yt-progress'),
 
+    qaQuestion: document.getElementById('yt-qa-question'),
+    qaAskBtn: document.getElementById('yt-qa-ask-btn'),
+    qaReadBtn: document.getElementById('yt-qa-read-btn'),
+    qaResponse: document.getElementById('yt-qa-response'),
+
     ttsEnabled: document.getElementById('yt-tts-enabled'),
     ttsProvider: document.getElementById('yt-tts-provider'),
     ttsVoice: document.getElementById('yt-tts-voice'),
@@ -1298,6 +1359,9 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
   applySubtitleOffset(subtitleOffsetPercent);
   syncAutoTtsGuardUi();
   syncProviderUI();
+  if (elements.qaResponse) {
+    renderQaAnswer('');
+  }
   syncTtsUI();
   if (elements.autoScroll) {
     elements.autoScroll.checked = autoScrollEnabled;
@@ -4366,6 +4430,182 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
     return text;
   }
 
+  function resolveQaStyleDescription() {
+    if (elements.stylePreset.value === 'custom') {
+      return elements.styleText?.value?.trim() || 'the user\'s custom style preference';
+    }
+    return elements.stylePreset.value.replace('-', ' ');
+  }
+
+  function resolveQaOutputLanguage() {
+    if (elements.outputLang.value === 'custom') {
+      return elements.customLang.value || 'English';
+    }
+    return elements.outputLang.value;
+  }
+
+  function buildQaContext(maxChars = 12000) {
+    if (!Array.isArray(sentenceData) || !sentenceData.length) {
+      return '';
+    }
+
+    const lines = sentenceData
+      .map(sentence => {
+        const baseText = (sentence.restyled || sentence.text || '').trim();
+        if (!baseText) return '';
+        const startTime = Number(sentence.start);
+        const prefix = Number.isFinite(startTime) ? `[${formatTime(startTime)}] ` : '';
+        return `${prefix}${baseText}`;
+      })
+      .filter(Boolean);
+
+    if (!lines.length) {
+      return '';
+    }
+
+    let joined = lines.join('\n');
+    if (joined.length > maxChars) {
+      const half = Math.floor(maxChars / 2);
+      const prefix = joined.slice(0, half);
+      const suffix = joined.slice(-half);
+      joined = `${prefix}\n...\n${suffix}`;
+    }
+
+    return joined;
+  }
+
+  function renderQaAnswer(answer, { isError = false } = {}) {
+    if (!elements.qaResponse) return;
+
+    const text = (answer || '').trim();
+    elements.qaResponse.classList.toggle('has-error', Boolean(isError && text));
+    elements.qaResponse.textContent = text;
+
+    qaAnswerText = isError ? '' : text;
+    if (elements.qaReadBtn) {
+      elements.qaReadBtn.disabled = !qaAnswerText;
+    }
+  }
+
+  async function handleQaAsk() {
+    if (qaRequestInFlight) {
+      return;
+    }
+
+    const question = (elements.qaQuestion?.value || '').trim();
+    if (!question) {
+      setStatus('Enter a question about the transcript first');
+      return;
+    }
+
+    if (!sentenceData.length) {
+      setError('Load a transcript before asking questions');
+      return;
+    }
+
+    if (!validateAllInputs()) {
+      setError('Please fix the validation errors before asking a question');
+      return;
+    }
+
+    const context = buildQaContext();
+    if (!context) {
+      setError('Transcript is empty. Fetch or restyle it before asking questions.');
+      return;
+    }
+
+    const styleDescription = resolveQaStyleDescription();
+    const outputLanguage = resolveQaOutputLanguage();
+    const asciiOnly = elements.asciiOnly.checked;
+    const blocklist = (elements.blocklist.value || '').trim();
+
+    let systemPrompt = `You are Transcript Styler's assistant. Answer questions using the provided transcript.
+Match the tone described as "${styleDescription}" and respond in ${outputLanguage}.
+Keep responses grounded in the transcript. If the information is missing, explain that clearly.`;
+
+    if (asciiOnly) {
+      systemPrompt += ` Use only standard ASCII characters in your reply${
+        blocklist ? ` and avoid these characters: ${blocklist}.` : '.'
+      }`;
+    }
+
+    const userPrompt = `Transcript context:\n${context}\n\nQuestion: ${question}\n\nProvide the styled answer:`;
+
+    const requestId = `qa-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const maxTokens = Math.min(2048, parseInt(elements.maxTokens?.value, 10) || 8192);
+    const temperature = parseFloat(elements.temperature?.value) || 0.4;
+
+    qaRequestInFlight = true;
+    const originalLabel = elements.qaAskBtn?.textContent;
+
+    if (elements.qaAskBtn) {
+      elements.qaAskBtn.disabled = true;
+      elements.qaAskBtn.textContent = 'Asking...';
+    }
+    if (elements.qaQuestion) {
+      elements.qaQuestion.disabled = true;
+    }
+    renderQaAnswer('');
+    setStatus('Asking transcript question...');
+
+    try {
+      const response = await sendMessage('LLM_CALL', {
+        provider: elements.provider.value,
+        baseUrl: elements.baseUrl.value,
+        apiKey: elements.apiKey.value,
+        model: elements.model.value,
+        systemPrompt,
+        userPrompt,
+        asciiOnly,
+        requestId,
+        anthropicVersion: elements.anthropicVersion.value.trim(),
+        maxTokens,
+        temperature
+      });
+
+      if (!response?.success) {
+        throw new Error(response?.error || 'Model call failed');
+      }
+
+      let answerText = String(response.data || '').trim();
+      if (!answerText) {
+        throw new Error('Model returned an empty answer');
+      }
+
+      if (asciiOnly) {
+        answerText = sanitizeAscii(answerText, blocklist);
+      }
+
+      renderQaAnswer(answerText);
+      setStatus('Answer ready');
+    } catch (error) {
+      logError('Transcript Q&A failed:', error);
+      renderQaAnswer(`Unable to generate an answer: ${error.message}`, { isError: true });
+      setError(`Failed to answer question: ${error.message}`);
+    } finally {
+      qaRequestInFlight = false;
+      if (elements.qaAskBtn) {
+        elements.qaAskBtn.disabled = false;
+        elements.qaAskBtn.textContent = originalLabel || 'Ask';
+      }
+      if (elements.qaQuestion) {
+        elements.qaQuestion.disabled = false;
+      }
+    }
+  }
+
+  async function handleQaRead() {
+    if (!qaAnswerText) {
+      setStatus('Ask a question to generate an answer before reading aloud');
+      return;
+    }
+
+    await speakTextWithPrefs(qaAnswerText, {
+      statusLabel: 'Playing Q&A response',
+      errorMessage: 'Failed to speak the Q&A response'
+    });
+  }
+
   async function generateTTS() {
     if (!elements.ttsEnabled.checked) {
       setError('TTS is disabled');
@@ -4723,6 +4963,27 @@ ${text}
   }
 
   // Event handlers
+  if (elements.qaAskBtn) {
+    elements.qaAskBtn.addEventListener('click', () => {
+      handleQaAsk();
+    });
+  }
+
+  if (elements.qaQuestion) {
+    elements.qaQuestion.addEventListener('keydown', event => {
+      if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+        event.preventDefault();
+        handleQaAsk();
+      }
+    });
+  }
+
+  if (elements.qaReadBtn) {
+    elements.qaReadBtn.addEventListener('click', () => {
+      handleQaRead();
+    });
+  }
+
   elements.debugToggle.addEventListener('change', () => {
     UI_DEBUG = elements.debugToggle.checked;
     savePrefs();

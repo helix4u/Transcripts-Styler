@@ -301,6 +301,31 @@ textarea {
   font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
 }
 
+.yt-qa-response {
+  background: var(--yt-secondary-bg);
+  border: 1px solid var(--yt-border-color);
+  border-radius: 6px;
+  padding: 8px 10px;
+  min-height: 72px;
+  max-height: 180px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--yt-text-primary);
+}
+
+.yt-qa-response:empty::before {
+  content: attr(data-placeholder);
+  color: var(--yt-text-muted);
+  font-size: 12px;
+}
+
+.yt-qa-response.has-error {
+  border-color: var(--yt-error-color);
+  color: var(--yt-error-color);
+}
+
 input[type='checkbox'] {
   accent-color: var(--yt-accent-color);
   margin: 0;
