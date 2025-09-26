@@ -989,7 +989,28 @@ chrome.storage.local.get(['ytro_debug', 'ytro_extension_enabled']).then(result =
   });
 });
 
-chrome.action.onClicked.addListener(async () => {
+chrome.action.onClicked.addListener(async tab => {
+  if (!EXTENSION_ENABLED) {
+    await setExtensionEnabled(true);
+    return;
+  }
+
+  const tabId = tab?.id;
+  const tabUrl = tab?.url || '';
+  const isYouTubeVideoPage = /:\/\/(www\.)?youtube\.com\/(watch|live\/)/i.test(tabUrl);
+
+  if (isYouTubeVideoPage && tabId !== undefined) {
+    try {
+      const response = await chrome.tabs.sendMessage(tabId, {
+        action: 'TOGGLE_OVERLAY_VISIBILITY'
+      });
+      log('Overlay visibility toggled via action button', response?.visible);
+    } catch (error) {
+      log('Failed to toggle overlay via action button', error?.message || error);
+    }
+    return;
+  }
+
   const nextState = !EXTENSION_ENABLED;
   await setExtensionEnabled(nextState);
 });

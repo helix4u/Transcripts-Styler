@@ -1,8 +1,11 @@
 // Transcript Styler - Content Script
 // v0.4.1-beta with comprehensive features and logging
 
-// Only inject on YouTube watch pages
-if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
+// Only inject on supported YouTube video pages
+const IS_YT_HOST = location.hostname === 'www.youtube.com';
+const IS_SUPPORTED_VIDEO_PATH = location.pathname === '/watch' || /^\/live\//.test(location.pathname);
+
+if (IS_YT_HOST && IS_SUPPORTED_VIDEO_PATH) {
   // Global state
   let transcriptData = []; // Original segments
   let sentenceData = []; // Parsed sentences
@@ -47,6 +50,7 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
   let autoScrollEnabled = false;
   let subtitleTimingOffsetMs = 0;
   let extensionEnabled = true;
+  let overlayHiddenByUser = false;
   let subtitlesEnabled = true;
   let autoLoadPromise = null;
   let autoLoadTimerId = null;
@@ -605,6 +609,33 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
   overlay.style.display = 'none';
   overlay.setAttribute('aria-hidden', 'true');
 
+  function showOverlay() {
+    if (!overlay.isConnected) {
+      document.body.appendChild(overlay);
+    }
+    overlayHiddenByUser = false;
+    overlay.style.display = 'block';
+    overlay.setAttribute('aria-hidden', 'false');
+    if (overlayDockPreferred) {
+      attemptParkOverlay();
+    }
+    ensureVideoListeners();
+  }
+
+  function hideOverlay({ userTriggered = false } = {}) {
+    if (!overlay.isConnected) {
+      document.body.appendChild(overlay);
+    }
+    if (userTriggered) {
+      overlayHiddenByUser = true;
+    }
+    overlay.style.display = 'none';
+    overlay.setAttribute('aria-hidden', 'true');
+    if (overlayParked) {
+      unparkOverlay();
+    }
+  }
+
   function applyExtensionEnabledState(enabled) {
     const previousState = extensionEnabled;
     const resolved = Boolean(enabled);
@@ -616,11 +647,8 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
     }
 
     if (!resolved) {
-      if (overlayParked) {
-        unparkOverlay();
-      }
-      overlay.style.display = 'none';
-      overlay.setAttribute('aria-hidden', 'true');
+      hideOverlay({ userTriggered: false });
+      overlayHiddenByUser = false;
       updateSubtitleText(null);
       resetSubtitleState();
       if (subtitleOverlayEl && subtitleOverlayEl.isConnected) {
@@ -636,14 +664,7 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
       return;
     }
 
-    overlay.style.display = 'block';
-    overlay.setAttribute('aria-hidden', 'false');
-
-    if (overlayDockPreferred) {
-      attemptParkOverlay();
-    }
-
-    ensureVideoListeners();
+    showOverlay();
 
     if (stateChanged || !elements.videoId.value) {
       detectVideoId();
@@ -3674,16 +3695,24 @@ if (location.hostname === 'www.youtube.com' && location.pathname === '/watch') {
   // Video detection
   function detectVideoId() {
     const urlParams = new URLSearchParams(location.search);
-    const videoId = urlParams.get('v');
+    let videoId = urlParams.get('v');
+
+    if (!videoId) {
+      const match = location.pathname.match(/^\/live\/([a-zA-Z0-9_-]{6,})/);
+      if (match && match[1]) {
+        videoId = match[1];
+      }
+    }
+
     if (videoId) {
       elements.videoId.value = videoId;
       savePrefs();
       setStatus(`Video detected: ${videoId}`);
       return videoId;
-    } else {
-      setError('No video ID found in URL');
-      return null;
     }
+
+    setError('No video ID found in URL');
+    return null;
   }
 
   // Track listing
@@ -5031,7 +5060,7 @@ ${text}
   });
 
   elements.closeBtn.addEventListener('click', () => {
-    overlay.remove();
+    hideOverlay({ userTriggered: true });
   });
 
   if (elements.dockToggle) {
@@ -5326,13 +5355,45 @@ ${text}
   });
 
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-    if (message && message.action === 'SET_EXTENSION_ENABLED') {
+    if (!message || !message.action) {
+      return undefined;
+    }
+
+    if (message.action === 'SET_EXTENSION_ENABLED') {
       applyExtensionEnabledState(message.enabled);
       if (typeof sendResponse === 'function') {
         sendResponse({ success: true });
       }
       return false;
     }
+
+    if (message.action === 'TOGGLE_OVERLAY_VISIBILITY') {
+      if (!extensionEnabled) {
+        if (typeof sendResponse === 'function') {
+          sendResponse({ success: false, error: 'extension disabled' });
+        }
+        return false;
+      }
+
+      const isHidden =
+        overlayHiddenByUser ||
+        overlay.style.display === 'none' ||
+        overlay.getAttribute('aria-hidden') === 'true';
+
+      if (isHidden) {
+        showOverlay();
+        if (typeof sendResponse === 'function') {
+          sendResponse({ success: true, visible: true });
+        }
+      } else {
+        hideOverlay({ userTriggered: true });
+        if (typeof sendResponse === 'function') {
+          sendResponse({ success: true, visible: false });
+        }
+      }
+      return false;
+    }
+
     return undefined;
   });
 
