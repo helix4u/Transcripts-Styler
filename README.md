@@ -49,5 +49,9 @@ Reload the extension from chrome://extensions after code changes. Overlay logs a
 - Provider errors? Double-check keys, base URLs, and concurrency; try single-request mode while debugging.
 - TTS silent? Browser voices need a user gesture and may fail with Unicode when ASCII-only is enabled.
 
+## Support
+
+If the tool is helpful, consider supporting it on [Ko-fi](https://ko-fi.com/gille).
+
 ## License
 MIT — see LICENSE.

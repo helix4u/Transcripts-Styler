@@ -667,6 +667,8 @@ if (IS_YT_HOST && IS_SUPPORTED_VIDEO_PATH) {
     showOverlay();
 
     if (stateChanged || !elements.videoId.value) {
+      clearPendingVideoIdRetry();
+      videoIdRetryToken += 1;
       detectVideoId();
       if (subtitlesEnabled) {
         scheduleAutoLoadTranscript('enable');
@@ -3692,26 +3694,213 @@ if (IS_YT_HOST && IS_SUPPORTED_VIDEO_PATH) {
     });
   }
 
-  // Video detection
-  function detectVideoId() {
-    const urlParams = new URLSearchParams(location.search);
-    let videoId = urlParams.get('v');
+  const videoIdPattern = /^[a-zA-Z0-9_-]{6,}$/;
+  const MAX_VIDEO_ID_RETRIES = 8;
+  const VIDEO_ID_RETRY_BASE_DELAY = 200;
+  let videoIdRetryToken = 0;
+  let videoIdRetryTimeoutId = null;
+  let lastDetectedHref = '';
 
-    if (!videoId) {
-      const match = location.pathname.match(/^\/live\/([a-zA-Z0-9_-]{6,})/);
-      if (match && match[1]) {
-        videoId = match[1];
+  function normalizeVideoId(candidate) {
+    if (typeof candidate !== 'string') {
+      return null;
+    }
+    const trimmed = candidate.trim();
+    return videoIdPattern.test(trimmed) ? trimmed : null;
+  }
+
+  function extractVideoIdFromUrl(url) {
+    if (!url) {
+      return null;
+    }
+
+    try {
+      const parsed = new URL(url, location.origin);
+
+      const paramId = normalizeVideoId(parsed.searchParams.get('v'));
+      if (paramId) {
+        return paramId;
+      }
+
+      const pathSegments = parsed.pathname.split('/').filter(Boolean);
+      if (!pathSegments.length) {
+        return null;
+      }
+
+      if (parsed.hostname === 'youtu.be' || parsed.hostname === 'www.youtu.be') {
+        return normalizeVideoId(pathSegments[0]);
+      }
+
+      const pathMatches = [
+        /^live$/,
+        /^watch$/,
+        /^embed$/,
+        /^shorts$/
+      ];
+
+      if (pathMatches.some(regex => regex.test(pathSegments[0])) && pathSegments[1]) {
+        return normalizeVideoId(pathSegments[1]);
+      }
+
+      const liveMatch = parsed.pathname.match(/\/live\/([a-zA-Z0-9_-]{6,})/);
+      if (liveMatch && liveMatch[1]) {
+        return normalizeVideoId(liveMatch[1]);
+      }
+    } catch (_) {
+      /* ignore URL parsing errors */
+    }
+
+    return null;
+  }
+
+  function extractVideoIdFromDom() {
+    const canonicalHref = document.querySelector('link[rel="canonical"]')?.href;
+    const canonicalId = extractVideoIdFromUrl(canonicalHref);
+    if (canonicalId) {
+      return canonicalId;
+    }
+
+    const metaId = normalizeVideoId(document.querySelector('meta[itemprop="videoId"]')?.content);
+    if (metaId) {
+      return metaId;
+    }
+
+    const flexy = document.querySelector('ytd-watch-flexy');
+    const candidates = [
+      flexy?.playerData?.videoDetails?.videoId,
+      flexy?.playerData?.videoId,
+      flexy?.playerData?.currentVideoId,
+      flexy?.player_?.getVideoData?.()?.video_id,
+      flexy?.__data?.playerResponse?.videoDetails?.videoId
+    ];
+
+    for (const candidate of candidates) {
+      const normalized = normalizeVideoId(candidate);
+      if (normalized) {
+        return normalized;
       }
     }
 
-    if (videoId) {
-      elements.videoId.value = videoId;
-      savePrefs();
-      setStatus(`Video detected: ${videoId}`);
-      return videoId;
+    const playerResponse = flexy?.player_?.playerResponse_ || flexy?.playerData?.response;
+    if (playerResponse && typeof playerResponse === 'string') {
+      try {
+        const parsed = JSON.parse(playerResponse);
+        const responseId = normalizeVideoId(parsed?.videoDetails?.videoId);
+        if (responseId) {
+          return responseId;
+        }
+      } catch (_) {
+        /* ignore JSON parse errors */
+      }
     }
 
-    setError('No video ID found in URL');
+    const initial = window.ytInitialPlayerResponse;
+    if (initial) {
+      const initialId = normalizeVideoId(initial.videoDetails?.videoId);
+      if (initialId) {
+        return initialId;
+      }
+      const endpointId = normalizeVideoId(initial.currentVideoEndpoint?.watchEndpoint?.videoId);
+      if (endpointId) {
+        return endpointId;
+      }
+    }
+
+    const ytPlayer = window.ytplayer;
+    const configCandidates = [
+      ytPlayer?.config?.args?.video_id,
+      ytPlayer?.config?.video_id
+    ];
+
+    for (const candidate of configCandidates) {
+      const normalized = normalizeVideoId(candidate);
+      if (normalized) {
+        return normalized;
+      }
+    }
+
+    if (typeof ytPlayer?.config?.args?.player_response === 'string') {
+      try {
+        const parsed = JSON.parse(ytPlayer.config.args.player_response);
+        const responseId = normalizeVideoId(parsed?.videoDetails?.videoId);
+        if (responseId) {
+          return responseId;
+        }
+      } catch (_) {
+        /* ignore JSON parse errors */
+      }
+    }
+
+    return null;
+  }
+
+  function clearPendingVideoIdRetry() {
+    if (videoIdRetryTimeoutId) {
+      clearTimeout(videoIdRetryTimeoutId);
+      videoIdRetryTimeoutId = null;
+    }
+  }
+
+  function scheduleVideoIdRetry(nextAttempt) {
+    clearPendingVideoIdRetry();
+    if (nextAttempt > MAX_VIDEO_ID_RETRIES) {
+      return;
+    }
+
+    const token = ++videoIdRetryToken;
+    const delay = Math.min(VIDEO_ID_RETRY_BASE_DELAY * (nextAttempt + 1), 1500);
+    videoIdRetryTimeoutId = setTimeout(() => {
+      if (token === videoIdRetryToken) {
+        detectVideoId({ attempt: nextAttempt });
+      }
+    }, delay);
+  }
+
+  function recordDetectedVideoId() {
+    lastDetectedHref = location.href;
+  }
+
+  function resetDetectedVideoIdState() {
+    lastDetectedHref = '';
+  }
+
+  function resolveVideoIdFromPage() {
+    return extractVideoIdFromUrl(location.href) || extractVideoIdFromDom();
+  }
+
+  // Video detection
+  function detectVideoId({ attempt = 0 } = {}) {
+    const previous = (elements.videoId.value || '').trim();
+    const resolved = resolveVideoIdFromPage();
+
+    if (resolved) {
+      clearPendingVideoIdRetry();
+      if (resolved !== previous) {
+        elements.videoId.value = resolved;
+        recordDetectedVideoId();
+        savePrefs();
+        setStatus(`Video detected: ${resolved}`);
+      } else if (location.href !== lastDetectedHref) {
+        recordDetectedVideoId();
+      }
+      return resolved;
+    }
+
+    if (attempt === 0 && location.href !== lastDetectedHref) {
+      elements.videoId.value = '';
+      resetDetectedVideoIdState();
+    }
+
+    if (attempt < MAX_VIDEO_ID_RETRIES) {
+      scheduleVideoIdRetry(attempt + 1);
+    } else if (!previous) {
+      setError('No video ID found on this page');
+    }
+
+    if (previous && lastDetectedHref === location.href && videoIdPattern.test(previous)) {
+      return previous;
+    }
+
     return null;
   }
 
@@ -5556,6 +5745,10 @@ ${text}
       activeTtsBatchId = null;
       browserTtsActive = false;
       updateStopButtonVisibility();
+      elements.videoId.value = '';
+      clearPendingVideoIdRetry();
+      videoIdRetryToken += 1;
+      resetDetectedVideoIdState();
       detectVideoId();
       if (subtitlesEnabled) {
         scheduleAutoLoadTranscript('navigation');
