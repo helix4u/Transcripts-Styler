@@ -253,7 +253,7 @@ function abortBatch(batchId) {
 
 const DEFAULT_ANTHROPIC_VERSION = '2023-06-01';
 const DEFAULT_KOKORO_TTS_URL = 'http://localhost:8880/v1/audio/speech';
-const DEFAULT_KOKORO_VOICE = 'af_sky+af+af_nicole';
+const DEFAULT_KOKORO_VOICE = 'af_sky+af_v0+af_nicole';
 
 function handleAbortRequests(data, sendResponse) {
   const payload = data || {};
